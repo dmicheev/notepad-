@@ -1,0 +1,20 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "notepad-plus"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+editor-core = { path = "../editor-core" }
+i18n = { path = "../i18n" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

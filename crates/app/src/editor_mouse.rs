@@ -1,0 +1,195 @@
+//! Мышь в редакторе (4.2/4.3, D9.2/D9.3): перевод координат окна в
+//! (строка, колонка) и стейт-машина драга — обычное выделение,
+//! column selection (Alt/Cmd+drag), Cmd+клик (добавить/снять курсор),
+//! Shift+клик (расширение), двойной/тройной клик (слово/строка).
+//!
+//! Ловушка gpui 0.2.2: on_mouse_up слушает КОНТЕЙНЕР редактора —
+//! click не срабатывает при драге между элементами, up обязан
+//! прилетать и вне строк.
+
+use gpui::{Context, Window};
+
+use crate::workspace::Workspace;
+
+/// Состояние мыши в редакторе (4.2): якорь и голова в (строка, колонка).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DragState {
+    /// Column selection (Alt/Cmd+drag — 4.3).
+    pub(crate) column: bool,
+    /// Начали с Cmd (Cmd+drag → колонка; Cmd+клик без движения → курсор).
+    pub(crate) cmd: bool,
+    pub(crate) anchor: (usize, usize),
+    pub(crate) head: (usize, usize),
+}
+
+impl DragState {
+    pub(crate) fn moved(&self) -> bool {
+        self.anchor != self.head
+    }
+}
+
+impl Workspace {
+    /// Диагностика мыши (NOTEPAD_DEBUG_MOUSE=1): каждое событие
+    /// логируется в stderr с сырыми координатами и вычисленной
+    /// позицией — для разбора «живых» проблем вне тестового стенда.
+    pub(crate) fn mouse_debug() -> bool {
+        static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *DEBUG.get_or_init(|| std::env::var("NOTEPAD_DEBUG_MOUSE").is_ok())
+    }
+
+    /// (real-строка, колонка) из позиции мыши в окне.
+    pub(crate) fn pos_to_line_col(
+        &mut self,
+        window: &Window,
+        pos: gpui::Point<gpui::Pixels>,
+    ) -> Option<(usize, usize)> {
+        self.ensure_fold_view();
+        let vis = self.visible_line_at_y(f32::from(pos.y))?;
+        let real = self.visible_to_real(vis);
+        let col = self.col_at_x(window, f32::from(pos.x));
+        if Self::mouse_debug() {
+            let b = self.editor_bounds();
+            let offset = f32::from(self.scroll.0.borrow().base_handle.offset().y);
+            let adv = self.char_advance(window);
+            let (bo, bs) = b
+                .map(|b| {
+                    (
+                        (f32::from(b.origin.x), f32::from(b.origin.y)),
+                        (f32::from(b.size.width), f32::from(b.size.height)),
+                    )
+                })
+                .unwrap_or(((0.0, 0.0), (0.0, 0.0)));
+            eprintln!(
+                "[mouse] map pos=({:.1},{:.1}) bounds_origin=({:.1},{:.1}) size=({:.1},{:.1}) scroll_y={:.1} advance={:.2} vis={} real={}",
+                f32::from(pos.x), f32::from(pos.y), bo.0, bo.1, bs.0, bs.1, offset, adv, vis, real
+            );
+        }
+        Some((real, col))
+    }
+
+    pub(crate) fn on_editor_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
+            return;
+        };
+        if Self::mouse_debug() {
+            let m = &event.modifiers;
+            eprintln!(
+                "[mouse] down count={} shift={} ctrl={} alt={} cmd={} pos=({:.1},{:.1}) -> (line {}, col {})",
+                event.click_count, m.shift, m.control, m.alt, m.platform,
+                f32::from(event.position.x), f32::from(event.position.y), line, col
+            );
+        }
+        let Some(tab) = self.model.active_mut() else { return };
+        window.focus(&self.focus);
+        let m = &event.modifiers;
+        if m.shift {
+            // Shift+клик — расширить выделение до позиции.
+            tab.select_to(line, col);
+            cx.notify();
+            return;
+        }
+        if m.alt || m.platform {
+            // Alt/Cmd+drag → column selection; Cmd+клик без движения
+            // на mouse_up добавит курсор (D9.3).
+            self.drag = Some(DragState {
+                column: true,
+                cmd: m.platform,
+                anchor: (line, col),
+                head: (line, col),
+            });
+        } else {
+            // Обычные клики (жесты мыши, D9.3): одиночный — каретка,
+            // двойной — слово, тройной — строка.
+            match event.click_count {
+                2 => tab.select_word_at(line, col),
+                n if n >= 3 => tab.select_line_at(line),
+                _ => {
+                    tab.set_caret_at(line, col);
+                    self.drag = Some(DragState {
+                        column: false,
+                        cmd: false,
+                        anchor: (line, col),
+                        head: (line, col),
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn on_editor_mouse_move(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut drag) = self.drag else { return };
+        let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
+            return;
+        };
+        if drag.head == (line, col) {
+            return;
+        }
+        if Self::mouse_debug() {
+            eprintln!(
+                "[mouse] move pos=({:.1},{:.1}) -> (line {}, col {})",
+                f32::from(event.position.x), f32::from(event.position.y), line, col
+            );
+        }
+        drag.head = (line, col);
+        self.drag = Some(drag);
+        if let Some(tab) = self.model.active_mut() {
+            if drag.column {
+                // Живой предпросмотр прямоугольника.
+                tab.set_column_block(drag.anchor, drag.head);
+            } else {
+                // Обычный драг: живое выделение от якоря.
+                tab.select_to(line, col);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn on_editor_mouse_up(
+        &mut self,
+        event: &gpui::MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut drag) = self.drag.take() else { return };
+        // Голову драга уточняем фактической позицией отпускания, если
+        // move-события её догнали (иначе — последняя известная).
+        if let Some(head) = self.pos_to_line_col(window, event.position) {
+            drag.head = head;
+        }
+        if Self::mouse_debug() {
+            eprintln!(
+                "[mouse] up pos=({:.1},{:.1}) anchor=({},{}) head=({},{}) column={}",
+                f32::from(event.position.x), f32::from(event.position.y),
+                drag.anchor.0, drag.anchor.1, drag.head.0, drag.head.1, drag.column
+            );
+        }
+        if let Some(tab) = self.model.active_mut() {
+            if drag.column {
+                if drag.moved() {
+                    // Alt/Cmd+drag: блок уже стоит (живой предпросмотр).
+                } else if drag.cmd {
+                    // Cmd+клик без движения — добавить курсор.
+                    tab.add_cursor_at(drag.anchor.0, drag.anchor.1);
+                } else {
+                    // Alt+клик без движения — просто каретка в якоре.
+                    tab.set_caret_at(drag.anchor.0, drag.anchor.1);
+                }
+            } else if drag.moved() {
+                tab.select_to(drag.head.0, drag.head.1);
+            }
+            // Обычный клик: каретка уже стоит с mouse_down.
+        }
+        cx.notify();
+    }
+}
