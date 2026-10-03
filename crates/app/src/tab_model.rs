@@ -816,13 +816,18 @@ impl TabModel {
     /// вкладку (дедупликация без каноникализации — диалоги ОС дают
     /// абсолютные нормализованные пути; D8.2), иначе новую вкладку
     /// и активировать её. Ошибка загрузки — наружу (GUI покажет).
+    /// Длительность успешного открытия идёт в панель PERFORMANCE (D11.8).
     pub fn open_path(&mut self, path: impl AsRef<Path>) -> io::Result<usize> {
         let path = path.as_ref();
         if let Some(i) = self.tabs.iter().position(|t| t.path.as_deref() == Some(path)) {
             self.active = Some(i);
             return Ok(i);
         }
+        let started = std::time::Instant::now();
         let tab = BufferTab::open(path)?;
+        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            crate::perf::note_open(name, started.elapsed().as_secs_f64() * 1000.0);
+        }
         self.tabs.push(tab);
         let i = self.tabs.len() - 1;
         self.active = Some(i);

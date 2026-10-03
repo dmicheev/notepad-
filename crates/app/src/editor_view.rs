@@ -298,6 +298,10 @@ impl Workspace {
                                     range.start, range.end, frame_ms
                                 );
                             }
+                            // Бенчмарк-стенд (D11.1): сбор длительностей
+                            // кадров по фазам (включён — только при
+                            // NOTEPAD_BENCH=1).
+                            crate::bench::record_frame(frame_ms);
                             items
                         },
                     ),

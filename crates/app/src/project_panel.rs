@@ -99,6 +99,8 @@ impl Workspace {
             }
             panel = panel.child(section);
         }
+        // Секция live-статистики производительности и памяти (D11.8).
+        panel = panel.child(self.render_perf_section());
         panel
     }
 }

@@ -19,6 +19,23 @@ use crate::session::{self, SessionState, WindowGeometry};
 use crate::tab_model::TabModel;
 use crate::theme::*;
 
+/// Кэш мапы visible→real для uniform_list (4.5/D9.5, D11.2).
+///
+/// Два состояния:
+/// - `Identity` — фолдов нет: мапа тождественная, НЕ аллоцируется и
+///   НЕ инвалидируется правками текста (правки не меняют folded-флаги
+///   и видимость); число видимых строк берётся из документа напрямую.
+///   Инвалидация — только появление фолдов (toggle_fold/fold_all/undo,
+///   восстанавливающий folded-флаги).
+/// - `Mapped` — есть фолды: материализованный Vec (O(n) памяти и
+///   пересборки); ключ — view_version (правки/undo/redo сдвигают
+///   строки тел — мапа обязана пересчитаться).
+#[derive(Debug)]
+pub(crate) enum FoldView {
+    Identity,
+    Mapped { version: u64, map: Vec<usize> },
+}
+
 /// Корневой view приложения.
 pub struct Workspace {
     pub model: TabModel,
@@ -43,10 +60,9 @@ pub struct Workspace {
     pub goto_input: Option<String>,
     /// Фокус-хендл overlay-ввода (клавиши диалога не попадают в редактор).
     pub(crate) goto_focus: FocusHandle,
-    /// Кэш мапы visible→real для uniform_list (4.5/D9.5): (индекс
-    /// вкладки, версия вида, мапа). Пересчитывается при правках,
-    /// фолдах и переключении вкладок (ключ — view_version).
-    pub(crate) fold_view: Option<(usize, u64, Vec<usize>)>,
+    /// Кэш мапы видимых строк (folding, D9.5/D11.2): индекс вкладки +
+    /// состояние (`FoldView`). Пересчёт — по правилам `FoldView`.
+    pub(crate) fold_view: Option<(usize, FoldView)>,
 }
 
 impl Workspace {
@@ -68,46 +84,62 @@ impl Workspace {
 
     /// Пересчитать мапу видимых строк, если устарела. Вызывается перед
     /// любым использованием мапы (рендер, координаты мыши, скролл).
+    ///
+    /// Правила инвалидации (D11.2): тождественная мапа живёт, пока
+    /// фолдов нет (правки текста folded-флаги не трогают); материальная
+    /// мапа пересобирается при ЛЮБОМ изменении view_version и при
+    /// уходе фолдов в ноль (тогда — обратно в тождественную, бесплатно).
+    /// Undo/redo меняет folded-флаги только вместе с LineMeta-синком
+    /// правок (Document::apply) — счётчик folded_count это покрывает:
+    /// 0→N ловится переходом Identity→Mapped, N→0 — обратно.
     pub(crate) fn ensure_fold_view(&mut self) {
-        let key = self.model.active_index();
-        let need = match (key, &self.fold_view) {
-            (Some(ix), Some((cached_ix, version, _))) => {
-                self.model.tabs()[ix].view_version() != *version || *cached_ix != ix
-            }
-            (Some(_), None) => true,
-            (None, _) => false,
+        let Some(ix) = self.model.active_index() else {
+            self.fold_view = None;
+            return;
+        };
+        let tab = &self.model.tabs()[ix];
+        let folded = tab.doc.line_meta().folded_count();
+        let version = tab.view_version();
+        let need = match &self.fold_view {
+            Some((cached_ix, view)) if *cached_ix == ix => match view {
+                FoldView::Identity => folded > 0,
+                FoldView::Mapped { version: v, .. } => folded == 0 || *v != version,
+            },
+            _ => true, // вкладки сменились / кэша нет
         };
         if need {
-            if let Some(ix) = key {
-                let tab = &self.model.tabs()[ix];
-                let map = crate::folding::visible_lines(&tab.doc);
-                let version = tab.view_version();
-                self.fold_view = Some((ix, version, map));
-            }
-        }
-        if key.is_none() {
-            self.fold_view = None;
+            self.fold_view = Some((
+                ix,
+                if folded == 0 {
+                    FoldView::Identity
+                } else {
+                    FoldView::Mapped { version, map: crate::folding::visible_lines(&tab.doc) }
+                },
+            ));
         }
     }
-
-    /// Мапа visible→real активной вкладки (после ensure_fold_view).
-    fn fold_map(&self) -> &[usize] {
-        self.fold_view.as_ref().map(|(_, _, m)| m.as_slice()).unwrap_or(&[])
-    }
-
-    // Геометрия (editor_bounds / char_advance / visible_line_at_y /
-    // col_at_x / page_lines) — в geometry.rs, единый источник (B).
 
     /// Индекс uniform_list (видимый) → real-строка документа (мапа
-    /// folding, D9.5). Скрытых индексов не бывает.
+    /// folding, D9.5). Скрытых индексов не бывает; тождественная мапа —
+    /// видимый индекс и есть real-строка.
     pub(crate) fn visible_to_real(&self, ix: usize) -> usize {
-        let map = self.fold_map();
-        map.get(ix).copied().unwrap_or(ix)
+        match &self.fold_view {
+            Some((_, FoldView::Mapped { map, .. })) => map.get(ix).copied().unwrap_or(ix),
+            _ => ix,
+        }
     }
 
     /// Сколько элементов сейчас в uniform_list (видимых строк).
     pub(crate) fn visible_len(&self) -> usize {
-        self.fold_map().len()
+        match &self.fold_view {
+            Some((_, FoldView::Identity)) => self
+                .model
+                .active()
+                .map(|t| t.doc.len_lines())
+                .unwrap_or(0),
+            Some((_, FoldView::Mapped { map, .. })) => map.len(),
+            None => 0,
+        }
     }
 
     /// Прокрутить к real-строке (через мапу видимых), стратегия —
@@ -125,16 +157,23 @@ impl Workspace {
     }
 
     /// real-строка → индекс uniform_list (видимый); скрытая строка —
-    /// её заголовок.
+    /// её заголовок. Тождественная мапа: clamp в последнюю строку
+    /// (как fallback материальной).
     fn real_to_visible(&self, line: usize) -> usize {
         let line = self
             .model
             .active()
             .map(|t| t.visible_line_or_header(line))
             .unwrap_or(line);
-        crate::folding::real_to_visible(self.fold_map(), line)
-            .unwrap_or_else(|| self.fold_map().len().saturating_sub(1))
+        match &self.fold_view {
+            Some((_, FoldView::Mapped { map, .. })) => crate::folding::real_to_visible(map, line)
+                .unwrap_or_else(|| map.len().saturating_sub(1)),
+            _ => line.min(self.visible_len().saturating_sub(1)),
+        }
     }
+
+    // Геометрия (editor_bounds / char_advance / visible_line_at_y /
+    // col_at_x / page_lines) — в geometry.rs, единый источник (B).
 
     // Мышь в редакторе (4.2/4.3): DragState, pos_to_line_col и
     // обработчики down/move/up — в editor_mouse.rs.
@@ -196,8 +235,19 @@ impl gpui::Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Бенчмарк-стенд (D11.1) и панель PERFORMANCE (D11.8): один
+        // Instant-замер — CPU-стоимость render (ensure_fold_view +
+        // элементное дерево), без vsync-ожидания.
+        let frame_started = std::time::Instant::now();
+
         // Мапа видимых строк (folding, D9.5) — пересчёт при устаревании.
         self.ensure_fold_view();
+
+        // Бенчмарк-стенд (D11.1): момент первого кадра (OnceLock —
+        // только первое срабатывание).
+        if crate::bench::enabled() {
+            crate::bench::record_first_frame();
+        }
 
         // Заголовок окна = активная вкладка (кэш — set только при
         // изменении, чтобы не перерисовывать окно каждый кадр).
@@ -301,6 +351,11 @@ impl Render for Workspace {
             .child(self.render_status_bar());
         if self.goto_input.is_some() {
             root = root.child(self.render_goto_overlay(cx));
+        }
+        let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+        crate::perf::note_frame(frame_ms);
+        if crate::bench::enabled() {
+            crate::bench::record_render(frame_ms);
         }
         root
     }

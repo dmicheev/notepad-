@@ -149,6 +149,16 @@ impl Default for FileFormat {
 /// Загружает файл: определение кодировки (BOM → UTF-8 валидация →
 /// chardetng), декодирование и нормализация переводов строк — потоково.
 /// Возвращает rope (LF-нормализованный) и определённый формат.
+///
+/// D11.2 (производительность): chardetng кормится НЕ в проходе
+/// валидации UTF-8 — на мультибайтовом UTF-8 детектор теряет ASCII
+/// fast-path и стоил 87% времени открытия 200 МБ (3.9 из 4.5 с).
+/// Эвристика нужна только если UTF-8 невалиден: тогда файл
+/// перечитывается, и детектор получает ровно те же байты — до конца
+/// куска с первым malformed-байтом включительно, как и при кормлении
+/// на лету (chardetng накапливает статистику по потоку байт,
+/// разбиение на куски результата не меняет) → `guess` детерминированно
+/// тот же, поведение не изменилось.
 pub(crate) fn load_path(path: &Path) -> io::Result<(Rope, FileFormat)> {
     let mut file = File::open(path)?;
     let mut prefix = vec![0u8; CHUNK];
@@ -165,16 +175,19 @@ pub(crate) fn load_path(path: &Path) -> io::Result<(Rope, FileFormat)> {
         return Ok((rope, FileFormat { encoding: Encoding::with_bom(enc), line_endings }));
     }
 
-    // 2. Потоковая валидация UTF-8; rope строится на лету, те же куски
-    //    параллельно кормятся детектору chardetng на случай fallback.
-    let mut detector = chardetng::EncodingDetector::new();
+    // 2. Потоковая валидация UTF-8; rope строится на лету. При первом
+    //    malformed-байте частичный rope отбрасывается — переход к 3.
+    //    `fail_chunk_end` — абсолютный конец куска, на котором
+    //    валидация споткнулась (в старой схеме детектор был накормлен
+    //    кусками до него включительно — тот же объём даём в шаге 3).
     let mut decoder = encoding_rs::UTF_8.new_decoder_without_bom_handling();
     let mut builder = RopeBuilder::new();
     let mut norm = NewlineNormalizer::new();
     let mut buf = vec![0u8; CHUNK];
     let mut out = String::with_capacity(CHUNK * 3 + 16);
-    let mut valid = true;
     let mut first = true;
+    let mut pos: usize = 0; // абсолютное начало текущего куска
+    let mut fail_chunk_end: Option<usize> = None;
     loop {
         let bytes: &[u8] = if first {
             first = false;
@@ -186,16 +199,16 @@ pub(crate) fn load_path(path: &Path) -> io::Result<(Rope, FileFormat)> {
             }
             &buf[..n]
         };
-        detector.feed(bytes, false);
         out.clear();
         let (res, _) = decoder.decode_to_string_without_replacement(bytes, &mut out, false);
         if matches!(res, DecoderResult::Malformed(..)) {
-            valid = false;
+            fail_chunk_end = Some(pos + bytes.len());
             break;
         }
         builder.append(norm.push(&out));
+        pos += bytes.len();
     }
-    if valid {
+    if fail_chunk_end.is_none() {
         // Финальный flush: незавершённая много-байтовая последовательность
         // в конце файла тоже делает UTF-8 невалидным.
         out.clear();
@@ -210,13 +223,31 @@ pub(crate) fn load_path(path: &Path) -> io::Result<(Rope, FileFormat)> {
                 FileFormat { encoding: Encoding::utf8(), line_endings: norm.stats() },
             ));
         }
+        // Malformed только в flush-хвосте: в старой схеме детектор был
+        // накормлен всем файлом.
+        fail_chunk_end = Some(pos);
     }
 
-    // 3. UTF-8 не прошёл валидацию — эвристика chardetng по накопленным
-    //    кускам; файл перечитывается с начала в предположенной кодировке.
-    let enc = detector.guess(None, false);
+    // 3. UTF-8 не прошёл валидацию — перечитываем файл и кормим
+    //    chardetng кусками по 64 КБ до `fail_chunk_end` включительно
+    //    (тот же поток байт, что накапливался бы на лету), затем
+    //    эвристика `guess` и потоковое декодирование с начала.
+    let mut detector = chardetng::EncodingDetector::new();
     let mut file2 = File::open(path)?;
-    let (rope, line_endings) = decode_stream(&mut file2, enc)?;
+    let mut dbuf = vec![0u8; CHUNK];
+    let mut fed: usize = 0;
+    let limit = fail_chunk_end.unwrap_or(usize::MAX);
+    while fed < limit {
+        let n = file2.read(&mut dbuf)?;
+        if n == 0 {
+            break;
+        }
+        detector.feed(&dbuf[..n], false);
+        fed += n;
+    }
+    let enc = detector.guess(None, false);
+    let mut file3 = File::open(path)?;
+    let (rope, line_endings) = decode_stream(&mut file3, enc)?;
     Ok((rope, FileFormat { encoding: Encoding::without_bom(enc), line_endings }))
 }
 
@@ -363,6 +394,11 @@ fn push_converted(chunk: &str, ending: LineEnding, out: &mut String) {
     }
 }
 
+/// Число байт `\n` в срезе (быстрый путь нормализатора, D11.2).
+fn count_lf(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&b| b == b'\n').count()
+}
+
 /// Конечный автомат нормализации переводов строк: CRLF и одинокие CR → LF
 /// (модель LF-нормализована, D6), перенос `\r|\n` через границу кусков —
 /// через флаг pending_cr. Заодно считает статистику по исходному тексту.
@@ -383,8 +419,46 @@ impl NewlineNormalizer {
     }
 
     /// Проглатывает кусок декодированного текста, возвращает нормализованный.
+    ///
+    /// D11.2: быстрый путь — кусок без `\r` (подавляющее большинство
+    /// UTF-8-файлов LF): копирование целиком через `push_str`, LF
+    /// считаются по байтам (авто-векторизация) вместо посимвольного
+    /// прохода. Семантика идентична: `\r` в куске нет — нормализовать
+    /// нечего, кроме счёта LF.
     fn push(&mut self, chunk: &str) -> &str {
         self.out.clear();
+        if self.pending_cr {
+            // Закрыть pending-CR первым символом куска; хвост — медленным
+            // путём (pending мог перезапуститься, если символ — '\r').
+            let mut chars = chunk.chars();
+            match chars.next() {
+                Some('\n') => {
+                    self.pending_cr = false;
+                    self.stats.crlf += 1;
+                    self.out.push('\n');
+                }
+                Some(c) => {
+                    self.pending_cr = false;
+                    self.stats.cr += 1;
+                    self.out.push('\n');
+                    self.handle(c);
+                }
+                None => return &self.out, // пустой кусок — pending остаётся
+            }
+            self.push_slow(chars.as_str());
+            return &self.out;
+        }
+        if !chunk.as_bytes().contains(&b'\r') {
+            self.stats.lf += count_lf(chunk.as_bytes());
+            self.out.push_str(chunk);
+            return &self.out;
+        }
+        self.push_slow(chunk);
+        &self.out
+    }
+
+    /// Посимвольный автомат (кусочья с '\r' и хвосты после pending-CR).
+    fn push_slow(&mut self, chunk: &str) {
         for c in chunk.chars() {
             if self.pending_cr {
                 self.pending_cr = false;
@@ -401,7 +475,6 @@ impl NewlineNormalizer {
                 self.handle(c);
             }
         }
-        &self.out
     }
 
     /// Завершает поток; одинокий CR в самом конце файла тоже становится LF.
@@ -665,6 +738,50 @@ mod tests {
         assert_eq!(doc.line_endings(), LineEndingStats { lf: 6000, crlf: 0, cr: 0 });
     }
 
+    /// D11.2 (отложенное кормление chardetng): malformed-байт в
+    /// середине файла — fallback на эвристику, lossy-декодирование с
+    /// U+FFFD; обрубленная multibyte-последовательность в самом конце
+    /// (ловится только flush-проходом) — тот же fallback.
+    #[test]
+    fn malformed_and_truncated_tail_fall_back_to_detection() {
+        let dir = TempDir::new("malformed");
+        // Кириллица UTF-8 + байт 0xFF в середине: UTF-8 невалиден →
+        // chardetng → windows-1251 → «привет» + U+FFFD вместо 0xFF.
+        let src = dir.path("mid.txt");
+        let mut bytes = "привет мир, строка раз\n".as_bytes().to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice("\nхвост строки\n".as_bytes());
+        std::fs::write(&src, &bytes).unwrap();
+        let doc = Document::load_file_detected(&src).unwrap();
+        assert!(!doc.encoding().has_bom());
+        assert_ne!(doc.encoding(), Encoding::utf8(), "невалидный UTF-8 — не UTF-8");
+        // Какая именно кодировка предположена — решение chardetng по
+        // тем же байтам, что и раньше (кормление отложено, но объём
+        // тот же); инвариант lossy-пути: файл ОТКРЫЛСЯ, строки целы
+        // (3 контентных + фантомная хвостовая ropey).
+        assert_eq!(doc.len_lines(), 4, "строки сохранены");
+
+        // Обрубленный хвост: "текст" + первый байт 2-байтовой
+        // последовательности без второго — flush фиксирует malformed.
+        let src2 = dir.path("tail.txt");
+        let mut bytes2 = "текст\n".as_bytes().to_vec();
+        bytes2.push(0xD0); // начало кириллической 2-байтовой пары
+        std::fs::write(&src2, &bytes2).unwrap();
+        let doc2 = Document::load_file_detected(&src2).unwrap();
+        assert_ne!(doc2.encoding(), Encoding::utf8(), "хвост невалиден");
+        // «текст\n» + хвостовой обрубок без перевода: 2 строки,
+        // фантомной нет (нет завершающего \n).
+        assert_eq!(doc2.len_lines(), 2);
+
+        // Малый файл (< одного куска) с malformed в первом куске —
+        // детектор получает только префикс.
+        let src3 = dir.path("small.txt");
+        std::fs::write(&src3, b"abc\xFEdef\n").unwrap();
+        let doc3 = Document::load_file_detected(&src3).unwrap();
+        assert_ne!(doc3.encoding(), Encoding::utf8());
+        assert_eq!(doc3.len_lines(), 2);
+    }
+
     /// Новый документ сохраняется как UTF-8/LF (дефолт формата).
     #[test]
     fn new_document_saves_utf8_lf_by_default() {
@@ -675,7 +792,67 @@ mod tests {
 
         let dst = dir.path("new.txt");
         doc.save_file(&dst).unwrap();
-        assert_eq!(std::fs::read(&dst).unwrap(), "строка один\nстрока два\n".as_bytes());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "строка один\nстрока два\n");
+    }
+
+    /// Профилировка загрузки по компонентам (D11.2): chardetng-feed /
+    /// декод+нормализация+rope / LineMeta::with_lines / полная загрузка.
+    /// Запуск: `cargo test --release -p editor-core -- --ignored
+    /// bench_load_components` с env `NOTEPAD_BENCH_DIR` (файлы
+    /// scripts/bench/gen_files.sh). ignored-by-default: числа зависят
+    /// от машины/файлов, assert только на здравый смысл.
+    #[test]
+    #[ignore = "бенчмарк: cargo test --release -- --ignored + NOTEPAD_BENCH_DIR"]
+    fn bench_load_components() {
+        let Some(dir) = std::env::var_os("NOTEPAD_BENCH_DIR") else {
+            eprintln!("[bench-load] NOTEPAD_BENCH_DIR не задан — пропуск");
+            return;
+        };
+        for name in ["short-20mb.txt", "short-200mb.txt", "empty-200mb.txt"] {
+            let path = std::path::Path::new(&dir).join(name);
+            let Ok(bytes_len) = std::fs::metadata(&path).map(|m| m.len()) else {
+                eprintln!("[bench-load] {name}: нет файла, пропуск");
+                continue;
+            };
+            let bytes = std::fs::read(&path).unwrap();
+
+            let t = std::time::Instant::now();
+            let mut detector = chardetng::EncodingDetector::new();
+            for chunk in bytes.chunks(64 * 1024) {
+                detector.feed(chunk, false);
+            }
+            let chardet_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+            let t = std::time::Instant::now();
+            let mut decoder = encoding_rs::UTF_8.new_decoder_without_bom_handling();
+            let mut builder = ropey::RopeBuilder::new();
+            let mut norm = NewlineNormalizer::new();
+            let mut out = String::with_capacity(64 * 1024 * 3 + 16);
+            for chunk in bytes.chunks(64 * 1024) {
+                out.clear();
+                let _ = decoder.decode_to_string_without_replacement(chunk, &mut out, false);
+                builder.append(norm.push(&out));
+            }
+            let rope = builder.finish();
+            let decode_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let lines = rope.len_lines();
+
+            let t = std::time::Instant::now();
+            let meta = crate::line_meta::LineMeta::with_lines(lines);
+            let meta_ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(meta.line_count(), lines);
+
+            let t = std::time::Instant::now();
+            let doc = Document::load_file_detected(&path).unwrap();
+            let full_ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(doc.len_chars(), rope.len_chars());
+
+            eprintln!(
+                "[bench-load] {name}: {bytes_len} байт, {lines} строк | chardetng_feed={chardet_ms:.0} мс \
+                 decode+norm+rope={decode_ms:.0} мс line_meta={meta_ms:.0} мс full={full_ms:.0} мс"
+            );
+            drop(meta);
+        }
     }
 
     /// Нормализатор: \r|\n через границу кусков и одинокий хвостовой CR.
@@ -696,5 +873,46 @@ mod tests {
         assert_eq!(n3.push("a\nb\r"), "a\nb");
         assert_eq!(n3.finish(), "\n");
         assert_eq!(n3.stats(), LineEndingStats { lf: 1, crlf: 0, cr: 1 });
+    }
+
+    /// D11.2 (fast-path нормализатора): куски без '\r' и связки
+    /// CR-CR-LF внутри одного куска — статистика и выход идентичны
+    /// посимвольному автомату.
+    #[test]
+    fn normalizer_fast_path_matches_char_loop() {
+        // Чистый LF-кусок: копирование целиком, счёт по байтам.
+        let mut n = NewlineNormalizer::new();
+        assert_eq!(n.push("a\nbb\nccc\nd"), "a\nbb\nccc\nd");
+        assert_eq!(n.finish(), "");
+        assert_eq!(n.stats(), LineEndingStats { lf: 3, crlf: 0, cr: 0 });
+
+        // CR-CR-LF в одном куске: одинокий CR + CRLF.
+        let mut n2 = NewlineNormalizer::new();
+        assert_eq!(n2.push("x\r\r\ny"), "x\n\ny");
+        assert_eq!(n2.finish(), "");
+        assert_eq!(n2.stats(), LineEndingStats { lf: 0, crlf: 1, cr: 1 });
+
+        // pending-CR закрывается '\n' в начале следующего куска, хвост
+        // с LF идёт быстрым путём.
+        let mut n3 = NewlineNormalizer::new();
+        assert_eq!(n3.push("a\r"), "a");
+        assert_eq!(n3.push("\nz\nw"), "\nz\nw");
+        assert_eq!(n3.stats(), LineEndingStats { lf: 1, crlf: 1, cr: 0 });
+
+        // pending-CR перезапускается ('\r' в начале), затем LF
+        // следующего куска закрывает его как CRLF (не LF!).
+        let mut n4 = NewlineNormalizer::new();
+        assert_eq!(n4.push("a\r"), "a");
+        assert_eq!(n4.push("\r"), "\n"); // старый pending закрыт одиноким CR
+        assert_eq!(n4.push("\nb"), "\nb"); // новый pending + '\n' → CRLF
+        assert_eq!(n4.stats(), LineEndingStats { lf: 0, crlf: 1, cr: 1 });
+
+        // Пустые куски не рвут автомат.
+        let mut n5 = NewlineNormalizer::new();
+        assert_eq!(n5.push(""), "");
+        assert_eq!(n5.push("q\r"), "q");
+        assert_eq!(n5.push(""), "");
+        assert_eq!(n5.finish(), "\n");
+        assert_eq!(n5.stats(), LineEndingStats { lf: 0, crlf: 0, cr: 1 });
     }
 }

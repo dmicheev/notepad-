@@ -632,6 +632,27 @@ fn sort_lines_action_on_selection(cx: &mut TestAppContext) {
     assert_eq!(text, "h\npear\napple\nbanana\nf");
 }
 
+/// D11.8 (панель PERFORMANCE): секция отрисована в левой панели,
+/// кадры render-прохода собираются, opens непусты после открытия.
+/// Глобальные статы perf разделяются параллельными тестами —
+/// проверяем только устойчивые инварианты.
+#[gpui::test]
+fn perf_panel_renders_stats(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "perf-panel", "one\ntwo\n");
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("perf-section")
+        .expect("секция PERFORMANCE отрисована");
+    assert!(
+        f32::from(bounds.size.width) > 100.0,
+        "секция на всю панель: {bounds:?}"
+    );
+    let (total, stats) = crate::perf::frame_snapshot();
+    assert!(total > 0, "render-проходы записаны");
+    assert!(stats.is_some(), "статистика кадров есть");
+    assert!(!crate::perf::recent_opens().is_empty(), "список открытий непуст");
+}
+
 /// Cmd+W (dispatch CloseTab) закрывает чистую вкладку; пустой
 /// редактор рендерится без паники.
 #[gpui::test]
@@ -640,4 +661,115 @@ fn close_tab_action_closes_clean_tab(cx: &mut TestAppContext) {
     cx.dispatch_action(CloseTab);
     cx.run_until_parked();
     assert!(cx.cx.update(|app| view.read(app).model.is_empty()));
+}
+
+/// D11.2 (identity-мапа): без фолдов кэш видимых строк — тождественный
+/// (FoldView::Identity) и ПЕРЕЖИВАЕТ правки текста: правки не меняют
+/// folded-флаги, пересборки/аллокации нет, видимость == числу строк.
+#[gpui::test]
+fn fold_view_identity_survives_edits(cx: &mut TestAppContext) {
+    let content: String = (0..50).map(|i| format!("line{i}\n")).collect();
+    let (view, cx, _path) = editor_with_file(cx, "fold-identity", &content);
+    cx.run_until_parked();
+    let identity = |cx: &gpui::VisualTestContext| {
+        cx.cx.update(|app| {
+            matches!(
+                view.read(app).fold_view,
+                Some((_, crate::workspace::FoldView::Identity))
+            )
+        })
+    };
+    let visible = |cx: &gpui::VisualTestContext| {
+        cx.cx.update(|app| {
+            let ws = view.read(app);
+            (ws.visible_len(), ws.model.active().unwrap().doc.len_lines())
+        })
+    };
+    assert!(identity(cx), "после открытия — identity");
+    // Правки (реальный путь клавиш): мапа НЕ инвалидируется, длина
+    // синхронна документу.
+    cx.simulate_keystrokes("x y enter z");
+    cx.run_until_parked();
+    assert!(identity(cx), "после правок — по-прежнему identity");
+    let (vis, lines) = visible(cx);
+    assert_eq!(vis, lines);
+    // Undo тоже не рвёт identity (фолдов нет — восстанавливать нечего).
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    assert!(identity(cx));
+    let (vis, lines) = visible(cx);
+    assert_eq!(vis, lines);
+}
+
+/// D11.2 (переходы кэша): fold_all → материальная мапа; правки при
+/// активных фолдах пересобирают её (строки тел сдвигаются); unfold_all
+/// → обратно identity. Undo, восстанавливающий folded-флаги удалённой
+/// строки-заголовка, обязан вернуть материальную мапу.
+#[gpui::test]
+fn fold_view_transitions_follow_fold_count(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "fold-trans", "fn a() {\n    b();\n}\n");
+    cx.run_until_parked();
+    let kind = |cx: &gpui::VisualTestContext| {
+        cx.cx.update(|app| match &view.read(app).fold_view {
+            Some((_, crate::workspace::FoldView::Identity)) => 0,
+            Some((_, crate::workspace::FoldView::Mapped { .. })) => 1,
+            None => 2,
+        })
+    };
+    // Полный файл: identity.
+    assert_eq!(kind(cx), 0);
+    // fold_all → mapped, видимых меньше.
+    cx.dispatch_action(FoldAll);
+    cx.run_until_parked();
+    assert_eq!(kind(cx), 1);
+    let folded_vis = cx.cx.update(|app| view.read(app).visible_len());
+    assert!(folded_vis < 4);
+    // Правка при активных фолдах: мапа пересобирается (версия растёт),
+    // видимость остаётся корректной.
+    cx.simulate_keystrokes("q");
+    cx.run_until_parked();
+    assert_eq!(kind(cx), 1, "фолды активны — mapped");
+    assert_eq!(cx.cx.update(|app| view.read(app).visible_len()), folded_vis);
+    // unfold_all → identity.
+    cx.dispatch_action(UnfoldAll);
+    cx.run_until_parked();
+    assert_eq!(kind(cx), 0);
+    assert_eq!(cx.cx.update(|app| view.read(app).visible_len()), 4);
+
+    // Undo восстанавливает folded-флаги: свернули, удалили заголовок
+    // (флаг исчез), undo вернул строку с флагом → мапа снова mapped.
+    let (view2, cx, _path) = editor_with_file(cx, "fold-undo", "fn a() {\n    b();\n}\n");
+    cx.update_window_entity(&view2, |ws, _w, _| {
+        ws.model.active_mut().unwrap().toggle_fold(0);
+        // Мутация модели без notify не рендерит — кэш мапы обновляем
+        // явно (в живом приложении это делает Render::render).
+        ws.ensure_fold_view();
+    });
+    cx.run_until_parked();
+    let folded_len = cx.cx.update(|app| view2.read(app).visible_len());
+    assert_eq!(folded_len, 3, "тело скрыто");
+    // Выделить строку-заголовок и заменить вводом (флаг исчезает вместе
+    // с заголовком — is_foldable ложен, тело снова видно).
+    let grid = MouseGrid::of(cx, &view2);
+    cx.simulate_mouse_down(grid.at(0.5, 0.2), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(grid.at(0.5, 0.2), MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("shift-end");
+    cx.simulate_keystrokes("space"); // ввод поверх выделения удаляет заголовок
+    cx.run_until_parked();
+    // Заголовок заменён пробелом: is_foldable ложен, тело снова видно.
+    let unfolded = cx.cx.update(|app| view2.read(app).visible_len());
+    assert_eq!(unfolded, 3);
+    // Undo возвращает "fn a() {" С folded-флагом (LineMeta-синк) —
+    // мапа обязана вернуться к свёрнутому виду.
+    cx.dispatch_action(Undo);
+    cx.run_until_parked();
+    let (vis, mapped) = cx.cx.update(|app| {
+        let ws = view2.read(app);
+        (
+            ws.visible_len(),
+            matches!(ws.fold_view, Some((_, crate::workspace::FoldView::Mapped { .. }))),
+        )
+    });
+    assert!(mapped, "undo восстановил folded-флаг — мапа материальная");
+    assert_eq!(vis, folded_len, "тело снова скрыто");
 }

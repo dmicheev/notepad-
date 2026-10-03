@@ -60,7 +60,7 @@ impl LineMeta {
     /// Пустой индекс на `line_count` строк (все флаги сброшены).
     pub fn with_lines(line_count: usize) -> Self {
         let mut meta = Self::new();
-        meta.insert_lines(0, line_count);
+        meta.build_balanced(line_count);
         meta
     }
 
@@ -194,6 +194,50 @@ impl LineMeta {
 
     fn size(&self, t: u32) -> usize {
         if t == NIL { 0 } else { self.nodes[t as usize].size as usize }
+    }
+
+    /// Прямое O(n) построение начального индекса (D11.2): старая сборка
+    /// `insert_lines(0, n)` делала n одиночных `merge` по правой
+    /// шпиле — ~0.2 мкс/строку (572 мс и двойной transient при
+    /// реаллокациях на 9.4М строк). Здесь строится сбалансированное
+    /// по midpoint-поддерево за один проход с точной резервацией арены.
+    ///
+    /// Приоритеты: старшие 8 бит монотонны по глубине (255 − depth),
+    /// младшие 56 бит — из того же детерминированного splitmix64-потока:
+    /// max-heap по построению (родитель строго мельче по глубине →
+    /// приоритет строго больше), случайность внутри уровня сохраняется.
+    /// Дальнейшие вставки/удаления со «случайными» приоритетами
+    /// цепляются к скелету — обычные инварианты treap выполняются.
+    fn build_balanced(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.nodes.reserve_exact(count);
+        /// Рекурсия глубиной log2(count) ≤ 64: [lo, hi) — диапазон строк.
+        fn build(meta: &mut LineMeta, lo: usize, hi: usize, depth: u32) -> u32 {
+            if lo >= hi {
+                return NIL;
+            }
+            let mid = lo + (hi - lo) / 2;
+            let left = build(meta, lo, mid, depth + 1);
+            let right = build(meta, mid + 1, hi, depth + 1);
+            let prio_high = (255u64.saturating_sub(u64::from(depth))) << 56;
+            let prio = prio_high | (meta.next_prio() & 0x00FF_FFFF_FFFF_FFFF);
+            meta.nodes.push(Node {
+                left,
+                right,
+                prio,
+                size: 0,
+                bookmarks: 0,
+                folds: 0,
+                bookmark: false,
+                folded: false,
+            });
+            let t = (meta.nodes.len() - 1) as u32;
+            meta.pull(t);
+            t
+        }
+        self.root = build(self, 0, count, 0);
     }
 
     fn bm_sum(&self, t: u32) -> u32 {
@@ -547,6 +591,38 @@ mod tests {
         assert_eq!(meta.bookmarked_lines(), vec![0]);
         assert_eq!(meta.folded_lines(), vec![2]);
         assert_eq!(meta.line_count(), doc.len_lines());
+    }
+
+    /// D11.2 (O(n)-построение скелета): индексы разных размеров —
+    /// счётчики, флаги, агрегаты и синхронизация с транзакциями.
+    #[test]
+    fn balanced_skeleton_supports_full_api() {
+        for n in [0usize, 1, 2, 3, 7, 100, 10_000] {
+            let meta = LineMeta::with_lines(n);
+            assert_eq!(meta.line_count(), n, "line_count({n})");
+            assert_eq!(meta.bookmark_count(), 0);
+            assert_eq!(meta.folded_count(), 0);
+            assert_eq!(meta.bookmarked_lines(), Vec::<usize>::new());
+            assert_eq!(meta.folded_lines(), Vec::<usize>::new());
+        }
+        // Флаги на скелете: точечные операции и агрегаты.
+        let mut meta = LineMeta::with_lines(10_000);
+        meta.set_bookmark(0);
+        meta.set_bookmark(5_001);
+        meta.set_folded(9_999, true);
+        assert_eq!(meta.bookmarked_lines(), vec![0, 5_001]);
+        assert_eq!(meta.folded_lines(), vec![9_999]);
+        assert_eq!(meta.next_bookmark(0), Some(5_001));
+        assert_eq!(meta.prev_bookmark(0), Some(5_001), "цикл через конец");
+        assert_eq!(meta.line_count(), 10_000);
+
+        // Синхронизация с транзакциями поверх скелета: вставка строк
+        // выше сдвигает флаги за содержимым.
+        let mut doc = Document::from_str(&"l\n".repeat(4_999)); // 5_000 строк
+        doc.line_meta_mut().set_bookmark(4_999);
+        doc.apply(&Transaction::from_edits(vec![Edit::insert(0, "x\ny\n")]));
+        assert_eq!(doc.line_meta().bookmarked_lines(), vec![5_001]);
+        assert_eq!(doc.line_meta().line_count(), doc.len_lines());
     }
 
     #[test]

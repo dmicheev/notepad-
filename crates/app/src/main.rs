@@ -3,6 +3,7 @@
 //! выходе (Cmd+Q / закрытие окна).
 
 mod actions;
+mod bench;
 mod editor_actions;
 mod editor_mouse;
 mod editor_view;
@@ -10,6 +11,7 @@ mod folding;
 mod geometry;
 mod goto_dialog;
 mod language;
+mod perf;
 mod project_panel;
 mod session;
 mod status_bar;
@@ -38,13 +40,22 @@ use crate::session::{RestorePlan, SessionState};
 use crate::workspace::Workspace;
 
 fn main() {
+    bench::enable_from_env();
     let app = Application::new();
     // macOS: клик по иконке в доке при закрытом окне открывает окно
     // заново с восстановлением сессии (приложение не завершается
     // закрытием последнего окна — D8.4).
     app.on_reopen(|cx: &mut App| {
         if cx.windows().is_empty() {
-            open_workspace_window(cx, None);
+        open_workspace_window(cx, None);
+        // Бенчмарк-стенд (D11.1): активировать приложение ПОСЛЕ создания
+        // окна — на macOS перерисовка gpui идёт через CVDisplayLink,
+        // который стартует только для видимого/активного окна; без
+        // активации при запуске из CLI стенд не получит кадры после
+        // первого (display link не запускается).
+        if bench::enabled() {
+            cx.activate(true);
+        }
         }
     });
     app.run(|cx: &mut App| {
@@ -122,16 +133,22 @@ fn main() {
 /// с сообщением в статус-бар).
 fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
     let mut status: Option<String> = None;
-    let state = match restore {
-        Some(s) => Some(s),
-        None => match session::session_path().map(|p| session::load_session(&p)) {
-            Some(Ok(s)) => s,
-            Some(Err(e)) => {
-                status = Some(format!("Could not read session: {e}"));
-                None
-            }
-            None => None,
-        },
+    // Бенчмарк-стенд (D11.1): сессию не восстанавливаем — в замер
+    // открытия NOTEPAD_OPEN не должны попадать чужие вкладки.
+    let state = if bench::enabled() {
+        None
+    } else {
+        match restore {
+            Some(s) => Some(s),
+            None => match session::session_path().map(|p| session::load_session(&p)) {
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
+                    status = Some(format!("Could not read session: {e}"));
+                    None
+                }
+                None => None,
+            },
+        }
     };
 
     // Геометрия окна: сохранённая (если осмысленная) или дефолт.
@@ -200,9 +217,16 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                         ws.status_message = Some(m);
                     }
                     // Бенчмарк 4.1: NOTEPAD_OPEN=<path> открывает файл при
-                    // старте без диалога (ошибка — только в stderr).
+                    // старте без диалога (ошибка — только в stderr). В режиме
+                    // NOTEPAD_BENCH замеряется длительность BufferTab::open
+                    // (load_file_detected + LineMeta) — D11.1.
                     if let Ok(path) = std::env::var("NOTEPAD_OPEN") {
-                        if let Err(e) = ws.model.open_path(&path) {
+                        let started = std::time::Instant::now();
+                        let opened = ws.model.open_path(&path);
+                        if bench::enabled() {
+                            bench::record_load(started.elapsed());
+                        }
+                        if let Err(e) = opened {
                             eprintln!("[bench] could not open {path}: {e}");
                         }
                     }
@@ -222,8 +246,15 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                 entity.read(cx).persist(window);
                 true
             });
+            // Бенчмарк-стенд (D11.1): async-драйвер скролла/ввода/undo
+            // с ручным Window::draw (независимость от CVDisplayLink).
+            // Запуск — после update ниже (см. bench::start).
         })
         .expect("update window");
+
+    if bench::enabled() {
+        bench::start(window.clone(), cx);
+    }
 
     // Cmd+Q / платформенный выход: сохранить сессию (наблюдатель
     // on_app_quit покрывает все пути завершения).

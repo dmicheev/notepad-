@@ -24,3 +24,14 @@ dirs = "6"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# D11.2 (дев-опыт): горячие leaf-зависимости редактора в dev-сборке
+# без оптимизаций замедляют открытие файлов и правки в разы относительно
+# release; opt-level=3 точечно для ropey (rope-мутации/строки) и
+# encoding_rs (декодирование) ускоряет debug, не трогая gpui (время
+# сборки) и не меняя release-профиль.
+[profile.dev.package.ropey]
+opt-level = 3
+
+[profile.dev.package.encoding_rs]
+opt-level = 3
