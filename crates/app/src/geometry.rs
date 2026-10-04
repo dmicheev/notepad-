@@ -81,6 +81,16 @@ impl Workspace {
     }
 }
 
+/// Видимость липкой шапки CSV (D12.5): строка 0 полностью ушла из
+/// вида — `|offset.y| ≥ LINE_HEIGHT` (offset.y ОТРИЦАТЕЛЕН при
+/// прокрутке вниз — см. `visible_line_at_y`; положительный —
+/// овёрскролл-отскок вверх, строка 0 видна). Частичный показ
+/// (0 < |offset| < LINE_HEIGHT) шапку НЕ дублирует — дубль поверх
+/// наполовину видимой строки 0 мерцает.
+pub(crate) fn sticky_header_visible(offset_y: f32) -> bool {
+    offset_y.abs() >= LINE_HEIGHT
+}
+
 /// Измерение advance «0» моноширинного шрифта; fallback 0.6em, если
 /// текстовая система недоступна (D9.2).
 fn measure_char_advance(window: &Window) -> f32 {
@@ -90,4 +100,26 @@ fn measure_char_advance(window: &Window) -> f32 {
         .ok()
         .filter(|a| *a > 0.0)
         .unwrap_or(FALLBACK_CHAR_ADVANCE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D12.5: предикат липкой шапки — ровно граница «строка 0 ушла
+    /// целиком» (замер --> GUI-тест csv_sticky_header_pins_on_scroll).
+    #[test]
+    fn sticky_header_visibility_predicate() {
+        assert!(!sticky_header_visible(0.0), "начало файла — шапки нет");
+        assert!(
+            !sticky_header_visible(-LINE_HEIGHT + 0.01),
+            "частичный показ строки 0 — шапку НЕ дублируем (мерцание)"
+        );
+        assert!(sticky_header_visible(-LINE_HEIGHT), "полный уход — шапка");
+        assert!(sticky_header_visible(-400.0), "глубокая прокрутка — шапка");
+        assert!(
+            !sticky_header_visible(12.0),
+            "овёрскролл-отскок вверх — строка 0 видна, шапки нет"
+        );
+    }
 }

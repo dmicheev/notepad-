@@ -16,33 +16,53 @@ impl Workspace {
 
     /// Cmd+O: диалог ОС (gpui 0.2.2 `prompt_for_paths`; rfd не нужен —
     /// D8.3), открытие каждого файла обычной вкладкой.
-    pub(crate) fn on_open(&mut self, _: &OpenFile, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("Open files".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                this.update(cx, |ws, cx| ws.open_paths(&paths, cx)).ok();
+                this.update_in(cx, |ws, window, cx| ws.open_paths(&paths, window, cx))
+                    .ok();
             }
         })
         .detach();
     }
 
     /// Открыть пути (дедупликация — в модели); ошибки — в статус-бар.
-    pub fn open_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+    /// Файлы сверх порога 20 МБ — вопрос пользователю о подсветке
+    /// (D12.4): согласие включает её для любого размера.
+    pub fn open_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let mut first_error: Option<String> = None;
+        let mut opened: Vec<usize> = Vec::new();
         for path in paths {
-            if let Err(e) = self.model.open_path(path) {
-                let msg = format!("Could not open {}: {e}", path.display());
-                eprintln!("{msg}");
-                first_error.get_or_insert(msg);
+            match self.model.open_path(path) {
+                Ok(i) => opened.push(i),
+                Err(e) => {
+                    let msg = format!("Could not open {}: {e}", path.display());
+                    eprintln!("{msg}");
+                    first_error.get_or_insert(msg);
+                }
             }
         }
         if let Some(msg) = first_error {
             self.status_message = Some(msg);
+        }
+        // Порог подсветки: спросить про новые крупные файлы.
+        let over: Vec<usize> = opened
+            .into_iter()
+            .filter(|&i| {
+                self.model
+                    .tab_mut(i)
+                    .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed)
+            })
+            .collect();
+        if !over.is_empty() && !crate::bench::enabled() {
+            self.pending_threshold_tabs.extend(over);
+            self.ask_pending_threshold(window, cx);
         }
         cx.notify();
     }

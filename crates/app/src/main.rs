@@ -11,6 +11,7 @@ mod folding;
 mod geometry;
 mod goto_dialog;
 mod language;
+mod language_dialog;
 mod perf;
 mod project_panel;
 mod session;
@@ -212,7 +213,12 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                         if let Some(e) = open_error {
                             status = status.or(Some(e));
                         }
+                        // Порог подсветки (5.3): уведомление, если
+                        // восстановленная вкладка >20 МБ (без гонки с
                     }
+                    // Восстановленные вкладки сверх порога — в очередь
+                    // вопроса (диалог после создания окна, D12.4).
+                    ws.queue_threshold_ask();
                     if let Some(m) = status.take() {
                         ws.status_message = Some(m);
                     }
@@ -228,6 +234,10 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                         }
                         if let Err(e) = opened {
                             eprintln!("[bench] could not open {path}: {e}");
+                        } else {
+                            // Порог подсветки (5.3/D12.4): вопрос
+                            // пользователю (не в bench-режиме).
+                            ws.queue_threshold_ask();
                         }
                     }
                     ws
@@ -239,6 +249,9 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
     window
         .update(cx, |ws: &mut Workspace, window, cx| {
             window.focus(&ws.focus);
+            // Вопрос о подсветке файлов сверх порога, накопленных при
+            // восстановлении сессии/NOTEPAD_OPEN (D12.4).
+            ws.ask_pending_threshold(window, cx);
             // Красная кнопка: сохранить сессию и разрешить закрытие;
             // приложение продолжает жить (dock-reopen откроет окно).
             let entity = cx.entity();

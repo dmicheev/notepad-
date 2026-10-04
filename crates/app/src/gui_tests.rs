@@ -638,7 +638,7 @@ fn sort_lines_action_on_selection(cx: &mut TestAppContext) {
 /// проверяем только устойчивые инварианты.
 #[gpui::test]
 fn perf_panel_renders_stats(cx: &mut TestAppContext) {
-    let (view, cx, _path) = editor_with_file(cx, "perf-panel", "one\ntwo\n");
+    let (_view, cx, _path) = editor_with_file(cx, "perf-panel", "one\ntwo\n");
     cx.run_until_parked();
     let bounds = cx
         .debug_bounds("perf-section")
@@ -772,4 +772,398 @@ fn fold_view_transitions_follow_fold_count(cx: &mut TestAppContext) {
     });
     assert!(mapped, "undo восстановил folded-флаг — мапа материальная");
     assert_eq!(vis, folded_len, "тело снова скрыто");
+}
+
+// ---- Подсветка синтаксиса (группа 5) ----
+
+/// Центр bounds (клик по элементу через debug_bounds).
+fn center_of(b: gpui::Bounds<gpui::Pixels>) -> gpui::Point<gpui::Pixels> {
+    point(
+        px(f32::from(b.origin.x) + f32::from(b.size.width) / 2.0),
+        px(f32::from(b.origin.y) + f32::from(b.size.height) / 2.0),
+    )
+}
+
+/// Окно с файлом заданного ИМЕНИ и содержимого (editor_with_file
+/// пишет фиксированный file.txt — подсветке нужно расширение).
+fn editor_with_named_file<'a>(
+    cx: &'a mut TestAppContext,
+    tag: &str,
+    name: &str,
+    content: &str,
+) -> (gpui::Entity<Workspace>, &'a mut gpui::VisualTestContext, PathBuf) {
+    let dir = TempDir::new(tag);
+    let path = dir.write(name, content);
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut ws = Workspace::new(cx);
+        // Реальный путь открытия (диалог/сессия): вопрос о подсветке
+        // сверх порога ставится здесь (D12.4).
+        ws.open_paths(std::slice::from_ref(&path), window, cx);
+        ws
+    });
+    cx.focus(&view);
+    (view, cx, path)
+}
+
+/// 5.2: подсветка рендерится — строка .rs разбита на цветовые сегменты
+/// (seg:0:N, N ≥ 3 — границы цвета режут строку), ШИРИНЫ сегментов
+/// суммируются в ширину строки (границы цвета не рвут текст).
+#[gpui::test]
+fn syntax_highlight_renders_colored_segments(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_named_file(
+        cx,
+        "hl-rs",
+        "main.rs",
+        "fn main() { let s = \"hi\"; }\n",
+    );
+    // Прогрев (в живом приложении — отложенная задача после первого
+    // кадра; тест форсирует синхронно).
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // debug_bounds требует 'static — литеральные ключи; сегментов у
+    // 27-символьной строки с цветами до ~30.
+    const KEYS: [&str; 32] = [
+        "seg:0:0", "seg:0:1", "seg:0:2", "seg:0:3", "seg:0:4", "seg:0:5", "seg:0:6", "seg:0:7",
+        "seg:0:8", "seg:0:9", "seg:0:10", "seg:0:11", "seg:0:12", "seg:0:13", "seg:0:14", "seg:0:15",
+        "seg:0:16", "seg:0:17", "seg:0:18", "seg:0:19", "seg:0:20", "seg:0:21", "seg:0:22", "seg:0:23",
+        "seg:0:24", "seg:0:25", "seg:0:26", "seg:0:27", "seg:0:28", "seg:0:29", "seg:0:30", "seg:0:31",
+    ];
+    let segs: Vec<gpui::Bounds<gpui::Pixels>> =
+        KEYS.iter().filter_map(|k| cx.debug_bounds(k)).collect();
+    assert!(
+        segs.len() >= 3,
+        "подсветка режет строку на цветовые сегменты: {segs:?}"
+    );
+    // Суммарная ширина сегментов == ширина строки минус 2px-каретки
+    // (каретка в col 0 рендерится 2px-дивом). Сравниваем с сеткой:
+    // 27 символов строки, advance сетки.
+    let grid = MouseGrid::of(cx, &view);
+    let total: f32 = segs.iter().map(|b| f32::from(b.size.width)).sum();
+    // 27 символов + 2px-каретка в col 0 (сегменты текста + каретка).
+    let expected = 27.0 * grid.advance + 2.0; // "fn main() { let s = \"hi\"; }"
+    assert!(
+        (total - expected).abs() < 4.0,
+        "сегменты покрывают строку: {total} vs {expected} (advance {:?})",
+        grid.advance
+    );
+}
+
+/// Round-trip: файл без языка (.txt) — ОДИН сегмент, как до подсветки
+/// (сегменты color-class не появляются).
+#[gpui::test]
+fn plain_file_single_segment_round_trip(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_named_file(cx, "hl-plain", "notes.txt", "just text\n");
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("seg:0:0").is_some());
+    assert!(
+        cx.debug_bounds("seg:0:1").is_none(),
+        "без языка строка — один сегмент (бит-в-бит как раньше)"
+    );
+}
+
+/// 5.1, сценарий спеки «Ручной выбор языка»: файл без расширения,
+/// клик по языку в статус-баре → оверлей → клик YAML → подсветка YAML
+/// немедленно (цветовые сегменты в рендере).
+#[gpui::test]
+fn language_picker_manual_yaml(cx: &mut TestAppContext) {
+    let (view, cx, _p) =
+        editor_with_named_file(cx, "hl-pick", "data", "# not yaml yet\nkey: value\n");
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // До выбора: Plain Text, один сегмент на строку.
+    assert!(cx.debug_bounds("seg:0:1").is_none());
+
+    // Клик по языку в статус-баре — открывается оверлей.
+    let lang = cx.debug_bounds("status-language").expect("язык кликабелен");
+    cx.simulate_click(center_of(lang), Modifiers::default());
+    cx.run_until_parked();
+    // Список длинный (64+) в 320px-скролле: ввод-фильтр «ya» поднимает
+    // YAML в видимую часть (заодно покрывает фильтрацию вводом).
+    cx.simulate_keystrokes("y a");
+    cx.run_until_parked();
+    let yaml_item = cx.debug_bounds("lang-item:YAML").expect("YAML в списке (после фильтра)");
+    cx.simulate_click(center_of(yaml_item), Modifiers::default());
+    cx.run_until_parked();
+
+    // Язык применился: статус-бар + цветовые сегменты строки «key: value».
+    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    assert!(status.contains("|  YAML"), "got: {status}");
+    assert!(
+        cx.debug_bounds("seg:1:1").is_some(),
+        "строка «key: value» разбита цветами"
+    );
+}
+
+/// 5.1, сценарий спеки «Открытие Python-файла»: .py подсвечивается
+/// автоматически после прогрева (без действий пользователя).
+#[gpui::test]
+fn python_file_highlighted_automatically(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_named_file(cx, "hl-py", "script.py", "def main():\n    pass\n");
+    // Никаких ручных действий: только прогрев набора (отложенная задача
+    // живого приложения).
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    assert!(status.contains("|  Python"), "got: {status}");
+    assert!(
+        cx.debug_bounds("seg:0:1").is_some(),
+        "«def main():» разбита цветами (keyword/function)"
+    );
+}
+
+/// 5.3/D12.4, сценарий спеки «Файл сверх порога — отказ»: 20 МБ+
+/// открывается редактируемым без подсветки; вопрос пользователя
+/// отклонён — сообщение об отключении.
+#[gpui::test]
+fn over_threshold_file_editable_declined(cx: &mut TestAppContext) {
+    // 20 МиБ + хвост: короткие строки для скорости.
+    let mut content = String::with_capacity(20 * 1024 * 1024 + 16);
+    while content.len() <= 20 * 1024 * 1024 {
+        content.push_str("abcdefghij\n");
+    }
+    let (view, cx, _p) = editor_with_named_file(cx, "hl-threshold", "big.rs", &content);
+    // Вопрос о подсветке сверх порога — отвечаем «Keep off».
+    assert!(cx.has_pending_prompt(), "вопрос показан при открытии");
+    cx.simulate_prompt_answer("Keep off");
+    cx.run_until_parked();
+    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    assert!(
+        status.contains("Syntax highlighting is off"),
+        "got: {status}"
+    );
+    // Редактирование полноценно: ввод работает, документ меняется.
+    cx.simulate_keystrokes("z");
+    let text_head = cx.cx.update(|app| {
+        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+    });
+    assert_eq!(text_head, "z");
+    cx.dispatch_action(Undo); // cmd-z биндинг в gpui::test пуст — действием
+    cx.run_until_parked();
+    let text_head = cx.cx.update(|app| {
+        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+    });
+    assert_eq!(text_head, "a", "undo работает");
+    // Подсветки нет: движок без синтаксиса (сегменты может резать
+    // только каретка — после ввода она в col 1). Язык — Plain Text.
+    let (syntax, label) = cx.cx.update(|app| {
+        let tab = view.read(app).model.active().unwrap();
+        (tab.highlight.syntax_name().map(str::to_string), tab.language_label().to_string())
+    });
+    assert_eq!(syntax, None);
+    assert_eq!(label, "Plain Text");
+}
+
+/// D12.4, сценарий спеки «Файл сверх порога — согласие»: пользователь
+/// разрешил — подсветка работает для файла ЛЮБОГО размера (20 МБ+),
+/// язык определяется, редактирование полноценно.
+#[gpui::test]
+fn over_threshold_prompt_enable_highlights_any_size(cx: &mut TestAppContext) {
+    let mut content = String::with_capacity(20 * 1024 * 1024 + 16);
+    while content.len() <= 20 * 1024 * 1024 {
+        content.push_str("call_000001(arg1, arg2) { if (deep) { trace(); } }\n");
+    }
+    let (view, cx, _p) = editor_with_named_file(cx, "hl-enable", "huge.rs", &content);
+    assert!(cx.has_pending_prompt(), "вопрос показан");
+    cx.simulate_prompt_answer("Enable");
+    cx.run_until_parked();
+    let (label, syntax) = cx.cx.update(|app| {
+        let tab = view.read(app).model.active().unwrap();
+        (tab.language_label().to_string(), tab.highlight.syntax_name().map(str::to_string))
+    });
+    assert_eq!(label, "Rust", "язык определился после согласия");
+    assert_eq!(syntax.as_deref(), Some("Rust"), "движок активен для 20 МБ+");
+    // Статус-бар сообщает о включении; редактирование работает.
+    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    assert!(status.contains("enabled for large"), "got: {status}");
+    cx.simulate_keystrokes("z");
+    let head = cx.cx.update(|app| {
+        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+    });
+    assert_eq!(head, "z");
+}
+
+/// D12.4, CSV: колонки чередуются цветами — строка «a,b,c» рендерится
+/// тремя цветовыми сегментами (границы полей), кавычки не рвут поля.
+#[gpui::test]
+fn csv_columns_render_colored_segments(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_named_file(
+        cx,
+        "hl-csv",
+        "data.csv",
+        "name,count,note\nalpha,42,ok\n\"x,y\",z\n",
+    );
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    assert!(status.contains("|  CSV"), "got: {status}");
+    // Строка 0 «name,count,note»: каретка в col 0 режет первый сегмент
+    // (без пустого — caret_before на «name»); чередование цветное
+    // поле / plain-запятая: name , count , note — 5 сегментов.
+    // debug_bounds требует 'static — литеральные ключи.
+    const COL_KEYS: [&str; 5] = ["seg:0:0", "seg:0:1", "seg:0:2", "seg:0:3", "seg:0:4"];
+    for k in COL_KEYS {
+        assert!(cx.debug_bounds(k).is_some(), "{k} — цветное поле или запятая");
+    }
+    assert!(cx.debug_bounds("seg:0:5").is_none(), "3 колонки → 5 сегментов");
+    // Строка 2 «\"x,y\",z»: кавычки держат поле целиком — 2 цветных
+    // поля + 1 запятая = 3 сегмента (4-го нет).
+    assert!(cx.debug_bounds("seg:2:0").is_some());
+    assert!(cx.debug_bounds("seg:2:1").is_some());
+    assert!(cx.debug_bounds("seg:2:2").is_some());
+    assert!(cx.debug_bounds("seg:2:3").is_none(), "запятая в кавычках не делит поле");
+}
+
+/// D12.5, сценарий спеки «Шапка CSV закреплена наверху»: прокрутка
+/// уводит строку 0 из вида — над списком появляется липкая копия
+/// заголовка (ширина = редактору, высота = строке, сегменты = тексту
+/// строки 0 с цветами колонок); клик по шапке — прокрутка к началу
+/// (offset = 0, шапка исчезла, на месте строка 0 выделена фоном).
+#[gpui::test]
+fn csv_sticky_header_pins_and_click_scrolls_to_top(cx: &mut TestAppContext) {
+    // 120 строк — строка 0 целиком уходит из вида небольшого окна.
+    let content: String = std::iter::once("name,count,note\n".to_string())
+        .chain((1..=120).map(|i| format!("row{i:03},{i},x\n")))
+        .collect();
+    let (view, cx, _p) = editor_with_named_file(cx, "csv-sticky", "data.csv", &content);
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    // Начало файла: оверлея нет; строка 0 выделена на месте.
+    assert!(cx.debug_bounds("csv-sticky-header").is_none());
+    assert!(
+        cx.debug_bounds("csv-header-inplace").is_some(),
+        "строка 0 выделена фоном шапки"
+    );
+
+    // Прокрутка вниз — путь живого скролла (offset + перерисовка:
+    // paint_scroll_listener gpui зовёт notify на view, спайк D12.5).
+    // Ловушка deferred-скролла: scroll_to_item применяется в prepaint
+    // ПОСЛЕ render — качаем второй кадр (в живом окне его даёт любое
+    // следующее событие).
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |_ws, _w, cx| cx.notify());
+    cx.run_until_parked();
+    let header = cx.debug_bounds("csv-sticky-header").expect("шапка закреплена наверху");
+    // Ширина ≈ ширине редактора (оверлей на всю ширину контейнера),
+    // высота = строке.
+    let editor = cx
+        .update_window_entity(&view, |ws, w, _| ws.editor_bounds().expect("editor bounds"));
+    assert!(
+        (f32::from(header.size.width) - f32::from(editor.size.width)).abs() < 1.0,
+        "header {:?} vs editor {:?}",
+        header.size,
+        editor.size
+    );
+    assert_eq!(f32::from(header.size.height), LINE_HEIGHT);
+    // Текст шапки = строка 0 «name,count,note»: 3 цветных поля + 2
+    // plain-запятые = 5 сегментов (кареток/выделений в копии нет).
+    for k in [
+        "csv-sticky-seg:0",
+        "csv-sticky-seg:1",
+        "csv-sticky-seg:2",
+        "csv-sticky-seg:3",
+        "csv-sticky-seg:4",
+    ] {
+        assert!(cx.debug_bounds(k).is_some(), "{k} — сегмент шапки");
+    }
+    assert!(cx.debug_bounds("csv-sticky-seg:5").is_none(), "ровно 5 сегментов");
+
+    // Клик по шапке — прокрутка к началу файла.
+    cx.simulate_click(center_of(header), Modifiers::default());
+    cx.run_until_parked();
+    let offset_y = cx.update_window_entity(&view, |ws, _, _| {
+        f32::from(ws.scroll.0.borrow().base_handle.offset().y)
+    });
+    assert_eq!(offset_y, 0.0, "прокрутка к началу");
+    assert!(
+        cx.debug_bounds("csv-sticky-header").is_none(),
+        "шапка исчезла — строка 0 на месте"
+    );
+    assert!(
+        cx.debug_bounds("csv-header-inplace").is_some(),
+        "выделение на месте вернулось"
+    );
+}
+
+/// D12.5: предикат оверлея на живом рендере — частичный показ строки 0
+/// (0 < |offset| < LINE_HEIGHT) шапку НЕ дублирует (мерцание), полный
+/// уход — дублирует; не-CSV — шапки нет при любой прокрутке.
+#[gpui::test]
+fn csv_sticky_header_partial_and_plain_files(cx: &mut TestAppContext) {
+    // Не-CSV: прокрутка вглубь — оверлея нет.
+    let lines: String = (0..120).map(|i| format!("line{i:03}\n")).collect();
+    let (view, cx, _p) = editor_with_named_file(cx, "sticky-plain", "data.txt", &lines);
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("csv-sticky-header").is_none(),
+        "не-CSV — шапки нет"
+    );
+
+    // CSV: set_offset пишет в общий с interactivity Rc<RefCell>
+    // scroll-offset (спайк D12.5) — точный контроль величины offset.
+    let csv: String = std::iter::once("a,b\n".to_string())
+        .chain((1..=120).map(|i| format!("{i},x\n")))
+        .collect();
+    let (view, cx, _p) = editor_with_named_file(cx, "sticky-half", "data.csv", &csv);
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.refresh_all_languages();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    // Частичный показ строки 0 (−половина строки) — дубля нет.
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-LINE_HEIGHT / 2.0)));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("csv-sticky-header").is_none(),
+        "частичный показ — без дубля"
+    );
+    // Полный уход (строка 0 целиком вне вида) — шапка есть.
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-(LINE_HEIGHT + 5.0))));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("csv-sticky-header").is_some(),
+        "полный уход — шапка закреплена"
+    );
 }

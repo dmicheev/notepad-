@@ -4,12 +4,77 @@
 //! ТОЛЬКО через editor-core (Document + History + транзакции
 //! selection.rs), каретка смещается правками через
 //! `Transaction::map_selection`. Интеграционные тесты — без GUI.
+//!
+//! Подсветка (группа 5): вкладка владеет языком (авто-детект + ручной
+//! override + порог 20 МБ) и движком `HighlightEngine` (кэш спанов на
+//! строку, чекпоинты стеков); инвалидация — в `apply_tx`/undo/redo.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use editor_core::{Document, History, Selection};
+use editor_core::{Document, History, HighlightEngine, Selection, SyntaxReference};
 use editor_core::{backspace, forward_delete, insert_text};
+
+/// Ручной выбор языка (5.1): авто / Plain Text / конкретная грамматика.
+#[derive(Debug, Default)]
+pub enum LanguageOverride {
+    #[default]
+    Auto,
+    PlainText,
+    Syntax(&'static SyntaxReference),
+}
+
+/// Язык вкладки: авто-детект (грамматика + метка статус-бара), ручной
+/// override, порог 20 МБ. Метка ≠ имя грамматики для TypeScript
+/// (псевдоним JS — D12.3). Порог (правка спеки, окт 2026/D12.4):
+/// файл больше 20 МБ открывается БЕЗ подсветки, приложение спрашивает
+/// пользователя; согласие (`threshold_allowed`) включает подсветку
+/// для любого размера.
+#[derive(Debug, Default)]
+pub struct TabLanguage {
+    auto: Option<crate::language::LabeledSyntax>,
+    pub override_: LanguageOverride,
+    /// Файл больше `HIGHLIGHT_MAX_BYTES` (байтов) — подсветка
+    /// выключена, пока пользователь не разрешит (диалог).
+    pub over_threshold: bool,
+    /// Пользователь разрешил подсветку сверх порога.
+    pub threshold_allowed: bool,
+}
+
+impl TabLanguage {
+    /// Подсветка выключена для этой вкладки.
+    pub fn disabled(&self) -> bool {
+        self.over_threshold && !self.threshold_allowed
+    }
+
+    /// Метка для статус-бара.
+    pub fn label(&self) -> &'static str {
+        if self.disabled() {
+            return "Plain Text";
+        }
+        match &self.override_ {
+            LanguageOverride::Syntax(s) => {
+                editor_core::syntax::friendly_name(&s.name)
+            }
+            LanguageOverride::PlainText => "Plain Text",
+            LanguageOverride::Auto => {
+                self.auto.as_ref().map(|(_, l)| *l).unwrap_or("Plain Text")
+            }
+        }
+    }
+
+    /// Грамматика подсветки; `None` — без подсветки.
+    pub fn effective(&self) -> Option<&'static SyntaxReference> {
+        if self.disabled() {
+            return None;
+        }
+        match &self.override_ {
+            LanguageOverride::Syntax(s) => Some(s),
+            LanguageOverride::PlainText => None,
+            LanguageOverride::Auto => self.auto.as_ref().map(|(s, _)| *s),
+        }
+    }
+}
 
 /// Одна вкладка: документ + история + курсоры + dirty-флаг
 /// (dirty ведётся здесь, на стороне tab-модели; editor-core не
@@ -31,6 +96,10 @@ pub struct BufferTab {
     /// Scroll-смещение редактора (y, px) — для переключений вкладок
     /// и восстановления сессии (по желанию, D8.4).
     pub scroll_y: f32,
+    /// Язык + подсветка (группа 5).
+    pub language: TabLanguage,
+    /// Движок подсветки: кэши спанов/стеков видимых строк (D12.1).
+    pub highlight: HighlightEngine,
     /// Версия вида: растёт при любом изменении, влияющем на рендер
     /// строк (правки, undo/redo, фолды). Ключ кэша мапы visible→real
     /// в виджете (4.5/D9.5). Закладки мапу не меняют и версию не трогают.
@@ -68,15 +137,26 @@ impl BufferTab {
             goal_col: None,
             dirty: false,
             scroll_y: 0.0,
+            language: TabLanguage::default(),
+            highlight: HighlightEngine::new(),
             view_version: 0,
         }
     }
 
     /// Открыть файл (кодировка/переводы строк — детект editor-core 2.5).
+    /// Язык: файл больше 20 МБ помечается `over_threshold` (подсветка
+    /// выключена; включение — согласие пользователя через диалог,
+    /// D12.4); детект — только если набор синтаксисов уже прогрет
+    /// (иначе — прогрев после первого кадра, D12.1).
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let doc = Document::load_file_detected(&path)?;
-        Ok(BufferTab {
+        let mut language = TabLanguage::default();
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size > crate::language::HIGHLIGHT_MAX_BYTES {
+            language.over_threshold = true;
+        }
+        let mut tab = BufferTab {
             path: Some(path),
             doc,
             history: History::new(),
@@ -84,8 +164,95 @@ impl BufferTab {
             goal_col: None,
             dirty: false,
             scroll_y: 0.0,
+            language,
+            highlight: HighlightEngine::new(),
             view_version: 0,
-        })
+        };
+        tab.detect_language_if_warm();
+        Ok(tab)
+    }
+
+    /// Детект языка без инициализации набора (открытие файла — бюджет
+    /// D11.2 не платит за syntect-инициализацию).
+    fn detect_language_if_warm(&mut self) {
+        if self.language.disabled() {
+            return;
+        }
+        if let Some(found) = crate::language::detect_if_warm(
+            self.path.as_deref(),
+            Some(&first_line_snippet(&self.doc)),
+        ) {
+            self.language.auto = Some(found);
+        }
+        self.sync_highlight_syntax();
+    }
+
+    /// Детект языка с инициализацией набора (прогрев после первого
+    /// кадра, ручной сброс в Auto, save-as). Меняет грамматику движка.
+    pub fn refresh_language(&mut self) {
+        if self.language.disabled() {
+            return;
+        }
+        self.language.auto = crate::language::detect_language(
+            self.path.as_deref(),
+            Some(&first_line_snippet(&self.doc)),
+        );
+        self.sync_highlight_syntax();
+    }
+
+    /// Разрешение подсветки сверх порога 20 МБ (согласие пользователя
+    /// в диалоге, D12.4): включает и детект — движок красит файл
+    /// любого размера (догон с бюджетом держит кадры).
+    pub fn allow_highlight_despite_threshold(&mut self) {
+        if !self.language.over_threshold || self.language.threshold_allowed {
+            return;
+        }
+        self.language.threshold_allowed = true;
+        self.refresh_language();
+    }
+
+    /// Ручной выбор языка (оверлей 5.1): грамматика None — Plain Text.
+    /// Синхронизирует движок (сброс кэшей при смене — внутри движка).
+    pub fn set_language(&mut self, syntax: Option<&'static SyntaxReference>) {
+        self.language.override_ = match syntax {
+            None => LanguageOverride::PlainText,
+            Some(s) => LanguageOverride::Syntax(s),
+        };
+        self.sync_highlight_syntax();
+    }
+
+    /// Ручной сброс в авто-детект.
+    pub fn set_language_auto(&mut self) {
+        self.language.override_ = LanguageOverride::Auto;
+        self.sync_highlight_syntax();
+    }
+
+    /// Метка языка статус-бара.
+    pub fn language_label(&self) -> &'static str {
+        self.language.label()
+    }
+
+    /// Вкладка — CSV/TSV (липкая шапка заголовка, D12.5): активная
+    /// грамматика «CSV» (одна на .csv/.tsv — заглушка D12.4) либо путь
+    /// с таким расширением. Расширение покрывает порог-отключение
+    /// подсветки (>20 МБ, отказ): шапка липнет и без цветовых спанов
+    /// (зафиксировано в D12.5).
+    pub fn is_csv(&self) -> bool {
+        if self.highlight.syntax_name() == Some("CSV") {
+            return true;
+        }
+        self.path
+            .as_deref()
+            .and_then(|p| p.extension().and_then(|e| e.to_str()))
+            .is_some_and(|e| e.eq_ignore_ascii_case("csv") || e.eq_ignore_ascii_case("tsv"))
+    }
+
+    /// Синхронизировать грамматику движка с состоянием языка.
+    fn sync_highlight_syntax(&mut self) {
+        let syntax = self.language.effective();
+        if self.highlight.syntax_name() != syntax.map(|s| s.name.as_str()) {
+            self.highlight.set_syntax(syntax);
+        }
     }
 
     /// Заголовок вкладки: имя файла или «Untitled N» (номер задаёт модель).
@@ -101,11 +268,13 @@ impl BufferTab {
 
     /// Сохранить в путь; успешное сохранение сбрасывает dirty и
     /// запоминает путь (для save-as и первого сохранения untitled).
+    /// После save-as расширение могло измениться — пере-детект (5.1).
     pub fn save_to(&mut self, path: impl Into<PathBuf>) -> io::Result<()> {
         let path = path.into();
         self.doc.save_file(&path)?;
         self.path = Some(path);
         self.dirty = false;
+        self.refresh_language();
         Ok(())
     }
 
@@ -155,17 +324,31 @@ impl BufferTab {
             self.cursors.iter().map(|s| tx.map_selection(s)).collect();
         self.cursors = dedup_carets(mapped);
         self.goal_col = None;
+        // Подсветка (D12.1): правки от первой затронутой строки (в
+        // до-координатах) до конца окна/первого валидного стека —
+        // внутри движка; строки выше правки не пересчитываются.
+        let first_edit_line = tx
+            .edits()
+            .iter()
+            .map(|e| e.start)
+            .min()
+            .map(|p| self.doc.char_to_line(p))
+            .unwrap_or(0);
         self.history.apply(&mut self.doc, &tx);
+        self.highlight.invalidate_from(first_edit_line);
         self.dirty = true;
         self.bump_view();
     }
 
     /// Undo; курсоры клампятся в границы документа (точный маппинг
-    /// сквозь undo-группу не нужен для MVP — D9.3).
+    /// сквозь undo-группу не нужен для MVP — D9.3). Подсветка: строки
+    /// правок неизвестны — полный сброс кэшей (ленивый переразбор,
+    /// D12.1).
     pub fn undo(&mut self) -> bool {
         let done = self.history.undo(&mut self.doc);
         if done {
             self.clamp_cursors();
+            self.highlight.reset_cache();
             self.bump_view();
         }
         done
@@ -177,6 +360,7 @@ impl BufferTab {
         let done = self.history.redo(&mut self.doc);
         if done {
             self.clamp_cursors();
+            self.highlight.reset_cache();
             self.bump_view();
         }
         done
@@ -701,6 +885,14 @@ impl BufferTab {
     fn line_len(&self, line: usize) -> usize {
         self.doc.line_content(line).chars().count()
     }
+}
+
+/// Первые ~1 КБ первой строки документа — эвристика содержимого для
+/// детекта языка (5.1; find_syntax_by_first_line хватает префикса).
+fn first_line_snippet(doc: &Document) -> String {
+    let mut s = doc.line_content(0);
+    s.truncate(s.len().min(1024));
+    s
 }
 
 /// После редактирования: все курсоры → каретки в головах; дубликаты
@@ -1670,5 +1862,212 @@ mod tests {
             t.doc = Document::from_str(s);
             t
         }
+    }
+
+    // ---- Подсветка синтаксиса (группа 5): сценарии спеки ----
+
+    use editor_core::highlight::CLASS_COMMENT;
+
+    /// Сценарий спеки «Открытие Python-файла»: .py получает подсветку
+    /// Python без действий пользователя (прогрев уже отработал —
+    /// refresh_language детектит по расширению).
+    #[test]
+    fn python_file_auto_highlighted() {
+        let dir = TempDir::new("py-auto");
+        let path = dir.write("script.py", "def main():\n    # comment\n    pass\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language(); // путь прогрева
+        assert_eq!(tab.language_label(), "Python");
+        assert_eq!(tab.highlight.syntax_name(), Some("Python"));
+        // Движок красит комментарий уже после первого окна.
+        tab.highlight.set_budget(std::time::Duration::from_secs(1));
+        tab.highlight.ensure_window(&tab.doc, 0, 3);
+        let spans = tab.highlight.spans(1).expect("спаны строки 1");
+        assert_eq!(
+            spans.iter().map(|s| (s.start, s.end, s.class)).collect::<Vec<_>>(),
+            vec![(4, 13, CLASS_COMMENT)]
+        );
+    }
+
+    /// Сценарий спеки «Ручной выбор языка»: файл БЕЗ расширения,
+    /// выбор YAML — подсветка применяется немедленно.
+    #[test]
+    fn manual_yaml_on_extensionless_file() {
+        let dir = TempDir::new("yaml-manual");
+        let path = dir.write("data", "# comment\nkey: value\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language();
+        assert_eq!(tab.language_label(), "Plain Text", "без расширения — авто нет");
+        assert_eq!(tab.highlight.syntax_name(), None);
+        // Ручной выбор YAML (оверлей 5.1 разрешает имя в грамматику).
+        let yaml = crate::language::syntax_for_choice("YAML").unwrap();
+        tab.set_language(Some(yaml));
+        assert_eq!(tab.language_label(), "YAML");
+        assert_eq!(tab.highlight.syntax_name(), Some("YAML"));
+        // Подсветка применяется НЕМЕДЛЕННО (кэш сброшен, окно красится).
+        tab.highlight.set_budget(std::time::Duration::from_secs(1));
+        tab.highlight.ensure_window(&tab.doc, 0, 2);
+        let spans = tab.highlight.spans(0).expect("спаны строки 0");
+        assert_eq!(
+            spans.iter().map(|s| (s.start, s.end, s.class)).collect::<Vec<_>>(),
+            vec![(0, 9, CLASS_COMMENT)]
+        );
+    }
+
+    /// Сценарий спеки «Файл сверх порога»: 20 МБ+1 байт открывается
+    /// редактируемым БЕЗ подсветки; язык «Plain Text»; undo работает.
+    #[test]
+    fn over_threshold_file_editable_without_highlight() {
+        let dir = TempDir::new("over-threshold");
+        // 20 МиБ + 1 байт текста (короткие строки — быстрее собирается).
+        let line = "abcdefghij\n";
+        let mut text = String::with_capacity(20 * 1024 * 1024 + line.len());
+        while text.len() <= 20 * 1024 * 1024 {
+            text.push_str(line);
+        }
+        assert!(text.len() > crate::language::HIGHLIGHT_MAX_BYTES as usize);
+        let path = dir.write("big.rs", &text); // .rs! язык всё равно отключён
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        assert!(tab.language.disabled());
+        assert_eq!(tab.language_label(), "Plain Text");
+        assert_eq!(tab.highlight.syntax_name(), None);
+        tab.refresh_language(); // порог необратим в рамках вкладки
+        assert_eq!(tab.highlight.syntax_name(), None);
+        // Редактирование полноценно: ввод/undo.
+        tab.insert_text("X");
+        assert_eq!(tab.doc.slice_str(0, 1), "X");
+        assert!(tab.undo());
+        assert_eq!(tab.doc.slice_str(0, 1), "a");
+        // Ровно 20 МиБ — подсветка ЕЩЁ включена (порог «свыше»).
+        let exact: String = "x".repeat(20 * 1024 * 1024);
+        let p2 = dir.write("exact.rs", &exact);
+        m.open_path(&p2).unwrap();
+        let t2 = m.active_mut().unwrap();
+        t2.refresh_language();
+        assert!(!t2.language.disabled(), "ровно порог — не отключать");
+        assert_eq!(t2.language_label(), "Rust");
+    }
+
+    /// Инвалидация правки через вкладку: спаны до строки правки живут,
+    /// после — пересчитываются; undo сбрасывает кэш (ленивый переразбор).
+    #[test]
+    fn highlight_cache_follows_edits() {
+        let dir = TempDir::new("hl-edits");
+        let path = dir.write("a.py", "# one\n# two\n# three\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language();
+        tab.highlight.set_budget(std::time::Duration::from_secs(1));
+        tab.highlight.ensure_window(&tab.doc, 0, 3);
+        assert!(tab.highlight.spans(2).is_some());
+        // Правка строки 1: кэш строки 0 жив, 1+ пересчитается.
+        tab.set_caret_at(1, 0);
+        tab.insert_text("x = 1\n");
+        assert!(tab.highlight.spans(0).is_some(), "строка выше правки жива");
+        tab.highlight.ensure_window(&tab.doc, 0, 4);
+        // «x = 1»: '=' keyword.operator, '1' — число; комментария нет
+        // (до правки строка была комментарием — кэш пересчитан).
+        let spans1 = tab.highlight.spans(1).expect("пересчитана");
+        assert!(
+            spans1.iter().all(|s| s.class != CLASS_COMMENT),
+            "{spans1:?}"
+        );
+        assert!(spans1.iter().any(|s| s.class == editor_core::highlight::CLASS_NUMBER));
+        // Undo: полный сброс — окно пересчитывается заново корректно.
+        assert!(tab.undo());
+        tab.highlight.ensure_window(&tab.doc, 0, 3);
+        assert_eq!(
+            tab.highlight
+                .spans(1)
+                .unwrap()
+                .iter()
+                .map(|s| (s.start, s.end, s.class))
+                .collect::<Vec<_>>(),
+            vec![(0, 5, CLASS_COMMENT)]
+        );
+    }
+
+    /// Каретки/выделения кэш подсветки не трогают (D12.1).
+    #[test]
+    fn caret_moves_do_not_invalidate_highlight() {
+        let dir = TempDir::new("hl-caret");
+        let path = dir.write("a.py", "# c\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language();
+        tab.highlight.set_budget(std::time::Duration::from_secs(1));
+        tab.highlight.ensure_window(&tab.doc, 0, 1);
+        let before = tab.highlight.spans(0).unwrap().clone();
+        tab.set_caret_at(0, 1);
+        tab.select_to(0, 1);
+        assert!(tab.undo() == false); // движений без правок — нет undo
+        assert_eq!(tab.highlight.spans(0), Some(&before));
+    }
+
+    /// Ручной выбор → сброс в Auto возвращает детект; Plain Text гасит.
+    #[test]
+    fn language_override_cycle() {
+        let dir = TempDir::new("hl-cycle");
+        let path = dir.write("m.md", "# title\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language();
+        assert_eq!(tab.language_label(), "Markdown");
+        let yaml = crate::language::syntax_for_choice("YAML").unwrap();
+        tab.set_language(Some(yaml));
+        assert_eq!(tab.language_label(), "YAML");
+        tab.set_language_auto();
+        assert_eq!(tab.language_label(), "Markdown");
+        tab.set_language(None); // Plain Text
+        assert_eq!(tab.language_label(), "Plain Text");
+        assert_eq!(tab.highlight.syntax_name(), None);
+    }
+
+    /// Save-as меняет расширение → авто-детект по новому пути (5.1).
+    #[test]
+    fn save_as_redetects_language() {
+        let dir = TempDir::new("hl-saveas");
+        let path = dir.write("untitled-ish", "# comment\n");
+        let mut m = TabModel::new();
+        m.open_path(&path).unwrap();
+        let tab = m.active_mut().unwrap();
+        tab.refresh_language();
+        assert_eq!(tab.language_label(), "Plain Text");
+        let target = dir.path().join("saved.py");
+        tab.save_to(&target).unwrap();
+        assert_eq!(tab.language_label(), "Python");
+    }
+
+    /// D12.5: is_csv — грамматика «CSV» (детект/ручной выбор) ИЛИ
+    /// расширение пути .csv/.tsv (регистронезависимо; покрывает
+    /// порог-отключение подсветки — шапка липнет без спанов).
+    /// Детект холодного/тёплого набора не меняет результат: холодный
+    /// набор даёт None-грамматику → срабатывает расширение пути.
+    #[test]
+    fn is_csv_for_csv_tsv_and_non_csv() {
+        let dir = TempDir::new("is-csv");
+        let csv = dir.write("a.csv", "x,y\n");
+        let tsv = dir.write("b.tsv", "x\ty\n");
+        let upper = dir.write("C.CSV", "x,y\n");
+        let txt = dir.write("c.txt", "x,y\n");
+        assert!(BufferTab::open(&csv).unwrap().is_csv());
+        assert!(BufferTab::open(&tsv).unwrap().is_csv());
+        assert!(BufferTab::open(&upper).unwrap().is_csv(), "регистронезависимо");
+        assert!(!BufferTab::open(&txt).unwrap().is_csv());
+        // Untitled (пути нет, грамматики нет) — не CSV.
+        assert!(!BufferTab::untitled().is_csv());
+        // Ручной выбор грамматики CSV для произвольного файла.
+        let mut tab = BufferTab::open(&txt).unwrap();
+        tab.set_language(crate::language::syntax_for_choice("CSV"));
+        assert!(tab.is_csv());
     }
 }

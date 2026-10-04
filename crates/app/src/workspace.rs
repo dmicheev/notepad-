@@ -60,6 +60,17 @@ pub struct Workspace {
     pub goto_input: Option<String>,
     /// Фокус-хендл overlay-ввода (клавиши диалога не попадают в редактор).
     pub(crate) goto_focus: FocusHandle,
+    /// Overlay выбора языка (5.1): буфер фильтра; фокус — отдельный
+    /// handle (паттерн goto_dialog).
+    pub language_input: Option<String>,
+    pub(crate) language_focus: FocusHandle,
+    /// Прогрев syntect запланирован (однократно; после первого кадра —
+    /// инициализация набора вне критического пути, D12.1).
+    pub(crate) syntax_warmup_scheduled: bool,
+    /// Вкладки сверх порога 20 МБ, ожидающие вопроса пользователю
+    /// (диалог ставится, когда доступен Window — сессия/NOTEPAD_OPEN
+    /// собирают до окна, D12.4).
+    pub(crate) pending_threshold_tabs: Vec<usize>,
     /// Кэш мапы видимых строк (folding, D9.5/D11.2): индекс вкладки +
     /// состояние (`FoldView`). Пересчёт — по правилам `FoldView`.
     pub(crate) fold_view: Option<(usize, FoldView)>,
@@ -78,8 +89,121 @@ impl Workspace {
             char_advance: None,
             goto_input: None,
             goto_focus: cx.focus_handle(),
+            language_input: None,
+            language_focus: cx.focus_handle(),
+            syntax_warmup_scheduled: false,
+            pending_threshold_tabs: Vec::new(),
             fold_view: None,
         }
+    }
+
+    /// Прогрев подсветки (5.1/D12.1): инициализация набора синтаксисов
+    /// (~сотни мс) + детект языков вкладок + первый разбор активной
+    /// (ленивые контексты/regex'ы синтаксиса — вне рендера). Вызывается
+    /// отложенно после первого кадра — холодный старт и открытие файлов
+    /// syntect не платят.
+    pub fn refresh_all_languages(&mut self) {
+        for i in 0..self.model.len() {
+            if let Some(tab) = self.model.tab_mut(i) {
+                tab.refresh_language();
+            }
+        }
+        // Прогреть грамматику активной вкладки (ленивая десериализация
+        // контекстов + компиляция regex'ов — разовая цена, D12.1).
+        if let Some(tab) = self.model.active_mut() {
+            if tab.highlight.syntax_name().is_some() {
+                let lines = tab.doc.len_lines();
+                tab.highlight.ensure_window(&tab.doc, 0, lines.min(64));
+            }
+        }
+    }
+
+    /// Транзиентное сообщение при открытии файла сверх порога (5.3):
+    /// подсветка отключена, редактирование доступно. Вызывается из
+    /// точек открытия (диалог, сессия, NOTEPAD_OPEN).
+    pub(crate) fn note_highlight_threshold(&mut self) {
+        if let Some(tab) = self.model.active() {
+            if tab.language.disabled() {
+                self.status_message = Some(
+                    "Syntax highlighting is off: file exceeds 20 MB".to_string(),
+                );
+            }
+        }
+    }
+
+    /// Поставить вкладки сверх порога в очередь на вопрос (D12.4):
+    /// диалог показывается, когда доступен Window (сессия/NOTEPAD_OPEN
+    /// открывают вкладки до окна). Bench-режим не спрашивает.
+    pub fn queue_threshold_ask(&mut self) {
+        if crate::bench::enabled() {
+            return;
+        }
+        for i in 0..self.model.len() {
+            let over = self
+                .model
+                .tab_mut(i)
+                .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed);
+            if over && !self.pending_threshold_tabs.contains(&i) {
+                self.pending_threshold_tabs.push(i);
+            }
+        }
+    }
+
+    /// Спросить пользователя о подсветке файлов сверх порога 20 МБ
+    /// (правка спеки окт 2026): согласие — подсветка любого размера
+    /// (догон с бюджетом держит кадры), отказ — выключена, сообщение.
+    pub fn ask_pending_threshold(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let indices = std::mem::take(&mut self.pending_threshold_tabs);
+        let indices: Vec<usize> = indices
+            .into_iter()
+            .filter(|&i| {
+                self.model
+                    .tab_mut(i)
+                    .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed)
+            })
+            .collect();
+        if indices.is_empty() || crate::bench::enabled() {
+            return;
+        }
+        let count = indices.len();
+        let single = count == 1;
+        let message: std::borrow::Cow<'static, str> = if single {
+            "This file is over 20 MB. Enable syntax highlighting anyway?".into()
+        } else {
+            format!("{count} opened files are over 20 MB. Enable syntax highlighting for them anyway?").into()
+        };
+        let rx = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some("Highlighting large files is progressive (budgeted per frame); scrolling and typing stay responsive."),
+            &["Enable", "Keep off"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = rx.await else { return };
+            this.update_in(cx, |ws, _window, cx| {
+                match choice {
+                    0 => {
+                        for i in indices {
+                            if let Some(tab) = ws.model.tab_mut(i) {
+                                tab.allow_highlight_despite_threshold();
+                            }
+                        }
+                        ws.status_message = Some(
+                            "Syntax highlighting enabled for large file(s)".to_string(),
+                        );
+                    }
+                    _ => {
+                        ws.status_message = Some(
+                            "Syntax highlighting is off: file exceeds 20 MB".to_string(),
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Пересчитать мапу видимых строк, если устарела. Вызывается перед
@@ -243,6 +367,25 @@ impl Render for Workspace {
         // Мапа видимых строк (folding, D9.5) — пересчёт при устаревании.
         self.ensure_fold_view();
 
+        // Прогрев подсветки (D12.1): один раз, отложенно (50 мс) после
+        // первого кадра — инициализация syntect и первый разбор НЕ на
+        // критическом пути старта/открытия. Прогрев меняет состояние —
+        // notify перерисует (язык в статус-баре, подсветка строк).
+        if !self.syntax_warmup_scheduled {
+            self.syntax_warmup_scheduled = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                this.update(cx, |ws, cx| {
+                    ws.refresh_all_languages();
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+
         // Бенчмарк-стенд (D11.1): момент первого кадра (OnceLock —
         // только первое срабатывание).
         if crate::bench::enabled() {
@@ -348,9 +491,12 @@ impl Render for Workspace {
                     .child(project_panel)
                     .child(center),
             )
-            .child(self.render_status_bar());
+            .child(self.render_status_bar(cx));
         if self.goto_input.is_some() {
             root = root.child(self.render_goto_overlay(cx));
+        }
+        if self.language_input.is_some() {
+            root = root.child(self.render_language_overlay(cx));
         }
         let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
         crate::perf::note_frame(frame_ms);
