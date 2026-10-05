@@ -13,6 +13,16 @@ actions!(
         RemoveDuplicateLines, RemoveEmptyLines,
         UpperCase, LowerCase, TitleCase, SentenceCase,
         FindInFile, FindInTabs, FindInFolder,
-        NewFile, NewFolder, RenameNode, DeleteNode
+        NewFile, NewFolder, RenameNode, DeleteNode,
+        // Split view (8.1/D15.1).
+        SplitEditor, ClosePane, ToggleSyncScroll,
+        // Темы (8.2/D15.2).
+        ThemeSystem, ThemeDark, ThemeLight,
+        // Шрифты (8.3/D15.3).
+        OpenFontDialog, ZoomIn, ZoomOut, ZoomReset,
+        // Язык интерфейса (8.4/D15.4).
+        OpenUiLanguageDialog,
+        // Раскладка 8.5: вкладки + справочник + язык.
+        NewTab, NextTab, PrevTab, ShowShortcuts, CycleLanguage
     ]
 );

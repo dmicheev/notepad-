@@ -9,13 +9,18 @@ mod editor_actions;
 mod editor_mouse;
 mod editor_view;
 mod folding;
+mod font_dialog;
 mod fs_tree;
 mod fs_watch;
 mod geometry;
 mod goto_dialog;
+mod i18n;
+mod keymap;
 mod language;
+mod menus;
 mod language_dialog;
 mod overlay_input;
+mod pane;
 mod perf;
 mod project_panel;
 mod scrollbar;
@@ -36,17 +41,11 @@ mod gui_tests;
 mod test_support;
 
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
-    WindowOptions, point, prelude::*, px, size,
+    App, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point,
+    prelude::*, px, size,
 };
 
-use crate::actions::{
-    AddNextMatch, CloseTab, DeleteNode, FindInFile, FindInFolder, FindInTabs, FoldAll, GoToLine,
-    LowerCase, NewFile, NewFolder, NextBookmark, OpenFile, OpenWorkspace, PrevBookmark, Quit,
-    Redo, RemoveDuplicateLines, RemoveEmptyLines, RenameNode, SaveFile, SaveFileAs, SentenceCase,
-    SortAsc, SortAscIgnoreCase, SortDesc, SortDescIgnoreCase, TitleCase, ToggleBookmark, Undo,
-    UnfoldAll, UpperCase,
-};
+use crate::actions::Quit;
 use crate::session::{RestorePlan, SessionState};
 use crate::workspace::Workspace;
 
@@ -70,120 +69,20 @@ fn main() {
         }
     });
     app.run(|cx: &mut App| {
+        // i18n (8.4): язык интерфейса из сессии (en — дефолт);
+        // внешние переводы — <data>/notepad-plus/locales/*.toml.
+        let saved_lang = session::session_path()
+            .and_then(|p| session::load_session(&p).ok().flatten())
+            .and_then(|s| s.language);
+        crate::i18n::init(cx, saved_lang.as_deref());
         // Минимальные горячие клавиши группы 3 (+undo/redo — часть
         // editing-пути через History; полный справочник — 8.5, D8.1).
-        cx.bind_keys([
-            KeyBinding::new("cmd-o", OpenFile, None),
-            KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
-            KeyBinding::new("cmd-s", SaveFile, None),
-            KeyBinding::new("cmd-shift-s", SaveFileAs, None),
-            KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("cmd-z", Undo, None),
-            KeyBinding::new("cmd-shift-z", Redo, None),
-            KeyBinding::new("cmd-q", Quit, None),
-            // Горячие клавиши группы 4 (только заявленные в 8.5):
-            // Cmd+G — переход к строке (4.2); Cmd+D — следующий курсор
-            // на совпадение слова (4.3).
-            KeyBinding::new("cmd-g", GoToLine, None),
-            KeyBinding::new("cmd-d", AddNextMatch, None),
-            // Закладки (4.4): Cmd+F2 — toggle, F2/Shift+F2 — вперёд/назад.
-            KeyBinding::new("cmd-f2", ToggleBookmark, None),
-            KeyBinding::new("f2", NextBookmark, None),
-            KeyBinding::new("shift-f2", PrevBookmark, None),
-            // Поиск (6): Cmd+F — панель поиска в файле; Cmd+Shift+F —
-            // поиск по открытым вкладкам. Поиск по папке и замена —
-            // меню Search (без хоткеев, раскладка — 8.5).
-            KeyBinding::new("cmd-f", FindInFile, None),
-            KeyBinding::new("cmd-shift-f", FindInTabs, None),
-            // Дерево воркспейса (7.2): создание/переименование/удаление
-            // по выделению дерева (контекстное меню — правый клик);
-            // F2 занят закладками → rename по IntelliJ-жесту Shift+F6,
-            // удаление — Finder-стиль Cmd+Backspace.
-            KeyBinding::new("cmd-n", NewFile, None),
-            KeyBinding::new("cmd-shift-n", NewFolder, None),
-            KeyBinding::new("shift-f6", RenameNode, None),
-            KeyBinding::new("cmd-backspace", DeleteNode, None),
-        ]);
-        cx.set_menus(vec![
-            // App-меню (macOS): только выход; всё остальное — по
-            // стандартным меню ниже (правка ручной проверки: единый
-            // список в app-меню не давал привычного «File»).
-            Menu {
-                name: "notepad+".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-            },
-            // Файлы и воркспейс: открытие/сохранение/вкладки (3.x, 7.x)
-            // + создание в дереве (7.2).
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New File", NewFile),
-                    MenuItem::action("New Folder", NewFolder),
-                    MenuItem::separator(),
-                    MenuItem::action("Open…", OpenFile),
-                    MenuItem::action("Open Workspace…", OpenWorkspace),
-                    MenuItem::separator(),
-                    MenuItem::action("Save", SaveFile),
-                    MenuItem::action("Save As…", SaveFileAs),
-                    MenuItem::separator(),
-                    MenuItem::action("Close Tab", CloseTab),
-                ],
-            },
-            // Правка: undo/redo (2.4) — стандартное место.
-            Menu {
-                name: "Edit".into(),
-                items: vec![
-                    MenuItem::action("Undo", Undo),
-                    MenuItem::action("Redo", Redo),
-                ],
-            },
-            // Навигация: переход к строке (4.2) и закладки (4.4).
-            Menu {
-                name: "Navigate".into(),
-                items: vec![
-                    MenuItem::action("Go to Line…", GoToLine),
-                    MenuItem::separator(),
-                    MenuItem::action("Toggle Bookmark", ToggleBookmark),
-                    MenuItem::action("Next Bookmark", NextBookmark),
-                    MenuItem::action("Previous Bookmark", PrevBookmark),
-                ],
-            },
-            // Вид: свёртывание блоков (4.5). Горячих клавиш нет — полный
-            // справочник в 8.5.
-            Menu {
-                name: "View".into(),
-                items: vec![
-                    MenuItem::action("Fold All", FoldAll),
-                    MenuItem::action("Unfold All", UnfoldAll),
-                ],
-            },
-            // Поиск (6): в файле / по вкладкам / по папке; замена — в панели.
-            Menu {
-                name: "Search".into(),
-                items: vec![
-                    MenuItem::action("Find…", FindInFile),
-                    MenuItem::action("Find in Tabs…", FindInTabs),
-                    MenuItem::action("Find in Folder…", FindInFolder),
-                ],
-            },
-            // Текст: операции со строками (4.6). Горячих клавиш нет — 8.5.
-            Menu {
-                name: "Text".into(),
-                items: vec![
-                    MenuItem::action("Sort Lines Ascending", SortAsc),
-                    MenuItem::action("Sort Lines Descending", SortDesc),
-                    MenuItem::action("Sort Lines Ascending (Ignore Case)", SortAscIgnoreCase),
-                    MenuItem::action("Sort Lines Descending (Ignore Case)", SortDescIgnoreCase),
-                    MenuItem::action("Remove Duplicate Lines", RemoveDuplicateLines),
-                    MenuItem::action("Remove Empty Lines", RemoveEmptyLines),
-                    MenuItem::separator(),
-                    MenuItem::action("UPPER CASE", UpperCase),
-                    MenuItem::action("lower case", LowerCase),
-                    MenuItem::action("Title Case", TitleCase),
-                    MenuItem::action("Sentence case", SentenceCase),
-                ],
-            },
-        ]);
+        // Раскладка (8.5/D15.5): единый источник keymap::KEYMAP —
+        // биндинги и справочник (Cmd+/) не расходятся. Платформенный
+        // выход Cmd+Q — отдельно (стандартное место приложения).
+        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        crate::keymap::bind_all(cx);
+        cx.set_menus(crate::menus::build(cx));
 
         open_workspace_window(cx, None);
     });
@@ -205,7 +104,7 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
             None => match session::session_path().map(|p| session::load_session(&p)) {
                 Some(Ok(s)) => s,
                 Some(Err(e)) => {
-                    status = Some(format!("Could not read session: {e}"));
+                    status = Some(crate::i18n::tf(cx, "status.session_read_failed", &[("err", &e.to_string())]));
                     None
                 }
                 None => None,
@@ -246,22 +145,48 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
             |_window, cx| {
                 cx.new(|cx| {
                     let mut ws = Workspace::new(cx);
+                    // Язык интерфейса (8.4) — зеркало глобали (для сессии).
+                    ws.ui_language = crate::i18n::language(cx);
+                    // Тема из сессии (8.2); System/неизвестная —
+                    // системная настройка.
+                    if let Some(kind) = state.as_ref().and_then(|s| s.theme.as_deref()) {
+                        ws.theme_kind = crate::theme::ThemeKind::parse(kind);
+                    }
+                    // Шрифт из сессии (8.3).
+                    let font_ok = |f: &session::FontSettings| {
+                        f.size.is_finite()
+                            && f.size >= crate::geometry::FONT_MIN
+                            && f.size <= crate::geometry::FONT_MAX
+                            && !f.family.trim().is_empty()
+                    };
+                    if let Some(font) = state
+                        .as_ref()
+                        .and_then(|s| s.font.clone())
+                        .filter(|f| font_ok(f))
+                    {
+                        ws.font =
+                            crate::geometry::FontConfig { family: font.family, size: font.size };
+                    }
                     if let Some(plan) = &plan {
                         let mut open_error: Option<String> = None;
                         for path in &plan.tabs {
-                            if let Err(e) = ws.model.open_path(path) {
+                            if let Err(e) = ws.model_mut().open_path(path) {
                                 eprintln!(
                                     "[session] could not open {}: {e}",
                                     path.display()
                                 );
-                                open_error.get_or_insert(format!(
-                                    "Could not open {}: {e}",
-                                    path.display()
+                                open_error.get_or_insert(crate::i18n::tf(
+                                    cx,
+                                    "status.open_failed",
+                                    &[
+                                        ("file", &path.display().to_string()),
+                                        ("err", &e.to_string()),
+                                    ],
                                 ));
                             }
                         }
                         if let Some(a) = plan.active {
-                            ws.model.activate(a);
+                            ws.model_mut().activate(a);
                         }
                         if !plan.skipped.is_empty() {
                             let names: Vec<String> = plan
@@ -273,10 +198,13 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                                         .unwrap_or_else(|| p.display().to_string())
                                 })
                                 .collect();
-                            status = Some(format!(
-                                "Skipped {} tab(s), file(s) no longer exist: {}",
-                                plan.skipped.len(),
-                                names.join(", ")
+                            status = Some(crate::i18n::tf(
+                                cx,
+                                "status.skipped_tabs",
+                                &[
+                                    ("n", &plan.skipped.len().to_string()),
+                                    ("files", &names.join(", ")),
+                                ],
                             ));
                         }
                         if let Some(e) = open_error {
@@ -301,7 +229,7 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                     // (load_file_detected + LineMeta) — D11.1.
                     if let Ok(path) = std::env::var("NOTEPAD_OPEN") {
                         let started = std::time::Instant::now();
-                        let opened = ws.model.open_path(&path);
+                        let opened = ws.model_mut().open_path(&path);
                         if bench::enabled() {
                             bench::record_load(started.elapsed());
                         }

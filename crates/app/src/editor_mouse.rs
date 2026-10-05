@@ -1,7 +1,12 @@
-//! Мышь в редакторе (4.2/4.3, D9.2/D9.3): перевод координат окна в
-//! (строка, колонка) и стейт-машина драга — обычное выделение,
+//! Мышь в редакторе (4.2/4.3, D9.2/D9.3 + 8.1): перевод координат
+//! окна в (строка, колонка) и стейт-машина драга — обычное выделение,
 //! column selection (Alt/Cmd+drag), Cmd+клик (добавить/снять курсор),
 //! Shift+клик (расширение), двойной/тройной клик (слово/строка).
+//!
+//! Split view: слушатели регистрируются редактором КАЖДОЙ панели с её
+//! индексом; down активирует панель, драг/скролл ведутся её моделью и
+//! scroll-handle. Драг, ушедший курсором в соседнюю панель, продолжает
+//! считаться геометрию по своей панели (MVP: bounds активной).
 //!
 //! Ловушка gpui 0.2.2: on_mouse_up слушает КОНТЕЙНЕР редактора —
 //! click не срабатывает при драге между элементами, up обязан
@@ -37,17 +42,19 @@ impl Workspace {
         *DEBUG.get_or_init(|| std::env::var("NOTEPAD_DEBUG_MOUSE").is_ok())
     }
 
-    /// Wheel редактора с разделением осей (ловушка gpui 0.2.2):
-    /// скролл-контейнер с ОДНОЙ осью конвертирует колесо другой оси в
-    /// свою (зона с overflow-x превратила бы вертикальное колесо в
-    /// горизонтальный скролл; список — горизонтальное в вертикальный).
-    /// Здесь дельта раскладывается по осям вручную (формулы внутренне
-    /// го слушателя gpui: offset += delta; клампы делает prepaint) и
+    /// Wheel редактора панели `pi` с разделением осей (ловушка gpui
+    /// 0.2.2): скролл-контейнер с ОДНОЙ осью конвертирует колесо другой
+    /// оси в свою (зона с overflow-x превратила бы вертикальное колесо
+    /// в горизонтальный скролл; список — горизонтальное в вертикальный).
+    /// Здесь дельта раскладывается по осям вручную (формулы внутреннего
+    /// слушателя gpui: offset += delta; клампы делает prepaint) и
     /// событие гасится. Вызывают: guard-оверлей зоны (срабатывает
     /// раньше внутренних слушателей — см. комментарий в editor_view)
-    /// и дорожки полос (вне зоны — guard их не покрывает).
-    pub(crate) fn on_editor_wheel(
+    /// и дорожки полос (вне зоны — guard их не покрывает). При
+    /// включённой синхронной прокрутке — рассинхрон панелей (8.1).
+    pub(crate) fn on_editor_wheel_pane(
         &mut self,
+        pi: usize,
         event: &gpui::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -58,16 +65,19 @@ impl Workspace {
         }
         // Вертикаль — в uniform_list (общий Rc offset с interactivity),
         // горизонталь — в зону; поперечные компоненты сохраняются.
-        let v = self.scroll.0.borrow().base_handle.clone();
+        let v = self.panes[pi].scroll.0.borrow().base_handle.clone();
         let vo = v.offset();
         v.set_offset(point(vo.x, vo.y + d.y));
-        let ho = self.h_scroll.offset();
-        self.h_scroll.set_offset(point(ho.x + d.x, ho.y));
+        let ho = self.panes[pi].h_scroll.offset();
+        self.panes[pi].h_scroll.set_offset(point(ho.x + d.x, ho.y));
+        if self.sync_scroll {
+            self.sync_scroll_from(pi, cx);
+        }
         cx.notify();
         cx.stop_propagation();
     }
 
-    /// (real-строка, колонка) из позиции мыши в окне.
+    /// (real-строка, колонка) из позиции мыши в окне (активная панель).
     pub(crate) fn pos_to_line_col(
         &mut self,
         window: &Window,
@@ -79,7 +89,7 @@ impl Workspace {
         let col = self.col_at_x(window, f32::from(pos.x));
         if Self::mouse_debug() {
             let b = self.editor_bounds();
-            let offset = f32::from(self.scroll.0.borrow().base_handle.offset().y);
+            let offset = f32::from(self.pane().scroll.0.borrow().base_handle.offset().y);
             let adv = self.char_advance(window);
             let (bo, bs) = b
                 .map(|b| {
@@ -97,12 +107,17 @@ impl Workspace {
         Some((real, col))
     }
 
-    pub(crate) fn on_editor_mouse_down(
+    pub(crate) fn on_editor_mouse_down_pane(
         &mut self,
+        pi: usize,
         event: &gpui::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Клик в редактор панели — активировать её (до геометрии:
+        // pos_to_line_col считает по активной панели).
+        self.activate_pane(pi, cx);
+        window.focus(&self.panes[pi].focus.clone());
         let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
             return;
         };
@@ -114,8 +129,7 @@ impl Workspace {
                 f32::from(event.position.x), f32::from(event.position.y), line, col
             );
         }
-        let Some(tab) = self.model.active_mut() else { return };
-        window.focus(&self.focus);
+        let Some(tab) = self.panes.get_mut(pi).and_then(|p| p.model.active_mut()) else { return };
         let m = &event.modifiers;
         if m.shift {
             // Shift+клик — расширить выделение до позиции.
@@ -126,7 +140,7 @@ impl Workspace {
         if m.alt || m.platform {
             // Alt/Cmd+drag → column selection; Cmd+клик без движения
             // на mouse_up добавит курсор (D9.3).
-            self.drag = Some(DragState {
+            self.panes[pi].drag = Some(DragState {
                 column: true,
                 cmd: m.platform,
                 anchor: (line, col),
@@ -140,7 +154,7 @@ impl Workspace {
                 n if n >= 3 => tab.select_line_at(line),
                 _ => {
                     tab.set_caret_at(line, col);
-                    self.drag = Some(DragState {
+                    self.panes[pi].drag = Some(DragState {
                         column: false,
                         cmd: false,
                         anchor: (line, col),
@@ -152,8 +166,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn on_editor_mouse_move(
+    pub(crate) fn on_editor_mouse_move_pane(
         &mut self,
+        pi: usize,
         event: &gpui::MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -163,7 +178,7 @@ impl Workspace {
         if self.on_scrollbar_drag_move(event, window, cx) {
             return;
         }
-        let Some(mut drag) = self.drag else { return };
+        let Some(mut drag) = self.panes.get(pi).and_then(|p| p.drag) else { return };
         let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
             return;
         };
@@ -177,8 +192,9 @@ impl Workspace {
             );
         }
         drag.head = (line, col);
-        self.drag = Some(drag);
-        if let Some(tab) = self.model.active_mut() {
+        if let Some(pane) = self.panes.get_mut(pi) {
+            pane.drag = Some(drag);
+            let Some(tab) = pane.model.active_mut() else { return };
             if drag.column {
                 // Живой предпросмотр прямоугольника.
                 tab.set_column_block(drag.anchor, drag.head);
@@ -190,8 +206,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn on_editor_mouse_up(
+    pub(crate) fn on_editor_mouse_up_pane(
         &mut self,
+        pi: usize,
         event: &gpui::MouseUpEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -200,7 +217,11 @@ impl Workspace {
         if self.on_scrollbar_drag_up(event, window, cx) {
             return;
         }
-        let Some(mut drag) = self.drag.take() else { return };
+        let Some(mut drag) = self
+            .panes
+            .get_mut(pi)
+            .and_then(|p| p.drag.take())
+        else { return };
         // Голову драга уточняем фактической позицией отпускания, если
         // move-события её догнали (иначе — последняя известная).
         if let Some(head) = self.pos_to_line_col(window, event.position) {
@@ -213,7 +234,7 @@ impl Workspace {
                 drag.anchor.0, drag.anchor.1, drag.head.0, drag.head.1, drag.column
             );
         }
-        if let Some(tab) = self.model.active_mut() {
+        if let Some(tab) = self.panes.get_mut(pi).and_then(|p| p.model.active_mut()) {
             if drag.column {
                 if drag.moved() {
                     // Alt/Cmd+drag: блок уже стоит (живой предпросмотр).

@@ -7,7 +7,6 @@ use gpui::{Context, MouseButton, div, prelude::*, px, rgb};
 
 use crate::search_panel::*;
 use crate::search_panel::SEARCH_PANEL_W;
-use crate::theme::*;
 use crate::workspace::Workspace;
 
 impl Workspace {
@@ -28,7 +27,7 @@ impl Workspace {
                 .unwrap_or_else(|| f.display().to_string()),
             _ => String::new(),
         };
-        let counter = sp.counter();
+        let counter = sp.counter(&crate::i18n::t(cx, "search.no_results"));
         let query = sp.query.clone();
         let replacement = sp.replacement.clone();
         let mask = sp.mask.clone();
@@ -43,7 +42,7 @@ impl Workspace {
         let results_len = sp.results.len();
         let truncated = sp.truncated;
 
-        let field_box = |text: String, placeholder: &str, active: bool, id: &'static str| {
+        let field_box = |text: String, placeholder: String, active: bool, id: &'static str| {
             div()
                 .id(id)
                 .debug_selector(move || id.to_string())
@@ -64,12 +63,12 @@ impl Workspace {
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(BG))
+                .bg(rgb(crate::theme::current().bg))
                 .border_1()
-                .border_color(rgb(if active { ACCENT } else { CLOSE_HOVER }))
+                .border_color(rgb(if active { crate::theme::current().accent } else { crate::theme::current().close_hover }))
                 .text_size(px(12.0))
-                .text_color(rgb(if text.is_empty() { DIM } else { TEXT }))
-                .child(if text.is_empty() { placeholder.to_string() } else { text })
+                .text_color(rgb(if text.is_empty() { crate::theme::current().dim } else { crate::theme::current().text }))
+                .child(if text.is_empty() { placeholder } else { text })
         };
 
         let chip = |label: &'static str, active: bool, id: &'static str| {
@@ -96,14 +95,14 @@ impl Workspace {
                 .py_1()
                 .text_size(px(11.0))
                 .rounded_sm()
-                .when(active, |d| d.bg(rgb(ACCENT)).text_color(rgb(STATUS_FG)))
-                .when(!active, |d| d.bg(rgb(CLOSE_HOVER)).text_color(rgb(TAB_INACTIVE)))
-                .hover(|d| d.bg(rgb(if active { STATUS_LANG_HOVER } else { CLOSE_HOVER })))
+                .when(active, |d| d.bg(rgb(crate::theme::current().accent)).text_color(rgb(crate::theme::current().status_fg)))
+                .when(!active, |d| d.bg(rgb(crate::theme::current().close_hover)).text_color(rgb(crate::theme::current().tab_inactive)))
+                .hover(|d| d.bg(rgb(if active { crate::theme::current().status_lang_hover } else { crate::theme::current().close_hover })))
                 .child(label)
         };
 
         // Строка 1: scope-чипы + запрос + счётчик + опции + навигация.
-        let scope_chip = |label: &'static str, active: bool, id: &'static str| {
+        let scope_chip = |label: String, active: bool, id: &'static str| {
             div()
                 .id(id)
                 .debug_selector(move || id.to_string())
@@ -123,8 +122,8 @@ impl Workspace {
                 .py_1()
                 .text_size(px(11.0))
                 .rounded_sm()
-                .when(active, |d| d.bg(rgb(ACCENT)).text_color(rgb(STATUS_FG)))
-                .when(!active, |d| d.bg(rgb(CLOSE_HOVER)).text_color(rgb(TAB_INACTIVE)))
+                .when(active, |d| d.bg(rgb(crate::theme::current().accent)).text_color(rgb(crate::theme::current().status_fg)))
+                .when(!active, |d| d.bg(rgb(crate::theme::current().close_hover)).text_color(rgb(crate::theme::current().tab_inactive)))
                 .child(label)
         };
 
@@ -140,9 +139,9 @@ impl Workspace {
             .flex_col()
             .gap_1()
             .p_2()
-            .bg(rgb(TABBAR))
+            .bg(rgb(crate::theme::current().tabbar))
             .border_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .rounded_bl_md()
             .shadow_md()
             .track_focus(&self.search_focus)
@@ -157,17 +156,17 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(scope_chip("File", is_file, "search-scope-file"))
-                    .child(scope_chip("Tabs", sp.scope == SearchScope::Tabs, "search-scope-tabs"))
+                    .child(scope_chip(crate::i18n::t(cx, "search.scope_file"), is_file, "search-scope-file"))
+                    .child(scope_chip(crate::i18n::t(cx, "search.scope_tabs"), sp.scope == SearchScope::Tabs, "search-scope-tabs"))
                     .child(scope_chip(
-                        "Folder",
+                        crate::i18n::t(cx, "search.scope_folder"),
                         is_folder,
                         "search-scope-folder",
                     ))
                     .child(
                         field_box(
                             query.clone(),
-                            if is_file { "Search…" } else { "Search (press Enter)…" },
+                            if is_file { crate::i18n::t(cx, "search.placeholder") } else { crate::i18n::t(cx, "search.placeholder_enter") },
                             field == SearchField::Query,
                             "search-field-query",
                         )
@@ -191,9 +190,9 @@ impl Workspace {
                             .py_1()
                             .text_size(px(12.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TEXT))
-                            .hover(|d| d.bg(rgb(ACCENT)).text_color(rgb(STATUS_FG)))
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().text))
+                            .hover(|d| d.bg(rgb(crate::theme::current().accent)).text_color(rgb(crate::theme::current().status_fg)))
                             .child("🔍"),
                     )
                     .child(
@@ -203,9 +202,9 @@ impl Workspace {
                             .px_1()
                             .text_size(px(11.0))
                             .text_color(rgb(if sp.matches.is_empty() && is_file {
-                                DIM
+                                crate::theme::current().dim
                             } else {
-                                TEXT
+                                crate::theme::current().text
                             }))
                             .child(counter.clone()),
                     )
@@ -228,8 +227,8 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TAB_INACTIVE))
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().tab_inactive))
                             .child("‹"),
                     )
                     .child(
@@ -247,8 +246,8 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TAB_INACTIVE))
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().tab_inactive))
                             .child("›"),
                     )
                     .child(
@@ -266,8 +265,8 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .hover(|d| d.bg(rgb(CLOSE_HOVER)))
-                            .text_color(rgb(TAB_INACTIVE))
+                            .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
+                            .text_color(rgb(crate::theme::current().tab_inactive))
                             .child("×"),
                     ),
             );
@@ -283,7 +282,7 @@ impl Workspace {
                 .child(
                     field_box(
                         replacement.clone(),
-                        "Replace with…",
+                        crate::i18n::t(cx, "search.replace_placeholder"),
                         field == SearchField::Replace,
                         "search-field-replace",
                     )
@@ -306,10 +305,10 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TEXT))
-                            .hover(|d| d.bg(rgb(ACCENT)))
-                            .child("Replace"),
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().text))
+                            .hover(|d| d.bg(rgb(crate::theme::current().accent)))
+                            .child(crate::i18n::t(cx, "search.replace")),
                     )
                     .child(
                         div()
@@ -326,10 +325,10 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TEXT))
-                            .hover(|d| d.bg(rgb(ACCENT)))
-                            .child("All"),
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().text))
+                            .hover(|d| d.bg(rgb(crate::theme::current().accent)))
+                            .child(crate::i18n::t(cx, "search.replace_all_button")),
                     );
             }
             panel = panel.child(row);
@@ -346,13 +345,13 @@ impl Workspace {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(DIM))
-                            .child("mask:"),
+                            .text_color(rgb(crate::theme::current().dim))
+                            .child(crate::i18n::t(cx, "search.mask_label")),
                     )
                     .child(
                         field_box(
                             mask.clone(),
-                            "*.rs  *.{ts,tsx}",
+                            crate::i18n::t(cx, "search.mask_placeholder"),
                             field == SearchField::Mask,
                             "search-field-mask",
                         )
@@ -361,7 +360,7 @@ impl Workspace {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(DIM))
+                            .text_color(rgb(crate::theme::current().dim))
                             .max_w(px(120.0))
                             .overflow_hidden()
                             .child(folder_name.clone()),
@@ -381,9 +380,9 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TAB_INACTIVE))
-                            .hover(|d| d.bg(rgb(ACCENT)))
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().tab_inactive))
+                            .hover(|d| d.bg(rgb(crate::theme::current().accent)))
                             .child("…"),
                     )
                     .child(
@@ -398,10 +397,10 @@ impl Workspace {
                             .py_1()
                             .text_size(px(11.0))
                             .rounded_sm()
-                            .bg(rgb(CLOSE_HOVER))
-                            .text_color(rgb(TEXT))
-                            .hover(|d| d.bg(rgb(ACCENT)))
-                            .child("Replace All…"),
+                            .bg(rgb(crate::theme::current().close_hover))
+                            .text_color(rgb(crate::theme::current().text))
+                            .hover(|d| d.bg(rgb(crate::theme::current().accent)))
+                            .child(crate::i18n::t(cx, "search.replace_in_files")),
                     ),
             );
         }
@@ -414,8 +413,8 @@ impl Workspace {
                     .debug_selector(|| "search-error".to_string())
                     .pl(px(86.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(SEARCH_ERROR))
-                    .child(format!("Invalid pattern: {err}")),
+                    .text_color(rgb(crate::theme::current().search_error))
+                    .child(crate::i18n::tf(cx, "search.invalid_pattern", &[("err", &err.to_string())])),
             );
         } else if scanning {
             panel = panel.child(
@@ -424,19 +423,25 @@ impl Workspace {
                     .debug_selector(|| "search-scanning".to_string())
                     .pl(px(86.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(DIM))
-                    .child("Scanning…"),
+                    .text_color(rgb(crate::theme::current().dim))
+                    .child(crate::i18n::t(cx, "search.scanning")),
             );
         } else if !is_file {
             let text = match (&summary, results_len) {
                 (Some(s), _) => format!(
-                    "{} match(es) in {} file(s){}",
-                    if results_len > 0 { results_len.to_string() } else { "0".into() },
-                    s.files_with_hits,
-                    if truncated { " (truncated)" } else { "" }
+                    "{}{}",
+                    crate::i18n::tf(
+                        cx,
+                        "search.summary",
+                        &[
+                            ("hits", &results_len.to_string()),
+                            ("files", &s.files_with_hits.to_string()),
+                        ],
+                    ),
+                    if truncated { crate::i18n::t(cx, "search.summary_truncated_suffix") } else { String::new() },
                 ),
-                (None, 0) => "Press Enter to search".to_string(),
-                (None, n) => format!("{n} match(es)"),
+                (None, 0) => crate::i18n::t(cx, "search.press_enter"),
+                (None, n) => crate::i18n::tf(cx, "search.summary_hits_only", &[("n", &n.to_string())]),
             };
             panel = panel.child(
                 div()
@@ -444,7 +449,7 @@ impl Workspace {
                     .debug_selector(|| "search-summary".to_string())
                     .pl(px(86.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(DIM))
+                    .text_color(rgb(crate::theme::current().dim))
                     .child(text),
             );
         }
@@ -464,17 +469,17 @@ impl Workspace {
         let mut section = div()
             .mt_2()
             .border_t_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .text_size(px(11.0))
-                    .text_color(rgb(PANEL_HEADER))
+                    .text_color(rgb(crate::theme::current().panel_header))
                     .child(if sp.scanning {
-                        format!("SEARCH ({}… scanning)", sp.results.len())
+                        crate::i18n::tf(cx, "panel.search_scanning", &[("n", &sp.results.len().to_string())])
                     } else {
-                        format!("SEARCH ({})", sp.results.len())
+                        crate::i18n::tf(cx, "panel.search", &[("n", &sp.results.len().to_string())])
                     }),
             );
         let mut last_owner: Option<String> = None;
@@ -497,7 +502,7 @@ impl Workspace {
                         .pt_1()
                         .pb(px(1.0))
                         .text_size(px(10.0))
-                        .text_color(rgb(if is_tab { ACCENT } else { PANEL_HEADER }))
+                        .text_color(rgb(if is_tab { crate::theme::current().accent } else { crate::theme::current().panel_header }))
                         .child(label.clone()),
                 );
             }
@@ -531,10 +536,10 @@ impl Workspace {
                     .px_3()
                     .py(px(1.0))
                     .text_size(px(11.0))
-                    .hover(|d| d.bg(rgb(CLOSE_HOVER)))
+                    .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
                     .child(
                         div()
-                            .text_color(rgb(ACCENT))
+                            .text_color(rgb(crate::theme::current().accent))
                             .flex_shrink_0()
                             .child(format!("Ln {}", hit.line + 1)),
                     )
@@ -543,14 +548,14 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .text_ellipsis()
-                            .text_color(rgb(TAB_INACTIVE))
+                            .text_color(rgb(crate::theme::current().tab_inactive))
                             .child(
                                 div()
                                     .flex()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .child(div().child(before))
-                                    .child(div().bg(rgb(SEARCH_MATCH)).text_color(rgb(TEXT)).child(matched))
+                                    .child(div().bg(rgb(crate::theme::current().search_match)).text_color(rgb(crate::theme::current().text)).child(matched))
                                     .child(div().child(after)),
                             ),
                     ),
@@ -564,7 +569,7 @@ impl Workspace {
                     .px_3()
                     .py_1()
                     .text_size(px(10.0))
-                    .text_color(rgb(PANEL_HINT))
+                    .text_color(rgb(crate::theme::current().panel_hint))
                     .child(format!(
                         "…and {hidden} more{}",
                         if sp.truncated { " (results truncated)" } else { "" }

@@ -65,11 +65,20 @@ fn editor_with_file<'a>(
     std::mem::forget(dir);
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut ws = Workspace::new(cx);
-        ws.model.open_path(&path).unwrap();
+        ws.model_mut().open_path(&path).unwrap();
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     (view, cx, path)
+}
+
+/// Фокус редактора панели 0 (8.1: у каждой панели свой FocusHandle;
+/// cx.focus(&view) фокусирует корневой handle — клавиши не доходят).
+fn focus_editor(view: &gpui::Entity<Workspace>, cx: &mut gpui::VisualTestContext) {
+    cx.update_window_entity(view, |ws, window, _cx| {
+        let f = ws.panes[0].focus.clone();
+        window.focus(&f);
+    });
 }
 
 /// Ввод с клавиатуры доходит до редактора и идёт через editor-core
@@ -79,7 +88,7 @@ fn typing_edits_document_and_marks_dirty(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "typing", "");
     cx.simulate_keystrokes("h e l l o");
     let (text, dirty, head) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.dirty, tab.primary().head())
     });
     assert_eq!(text, "hello");
@@ -96,7 +105,7 @@ fn arrow_keys_move_caret(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("home"); // → 3
     cx.simulate_keystrokes("left"); // → 2 (на терминатор)
     let (head, line, col) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.primary().head(), tab.cursor_line(), tab.cursor_col())
     });
     assert_eq!(head, 2);
@@ -112,7 +121,7 @@ fn backspace_and_enter(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("backspace"); // "a"
     cx.simulate_keystrokes("enter"); // "a\n"
     let (text, head) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.primary().head())
     });
     assert_eq!(text, "a\n");
@@ -128,7 +137,7 @@ fn save_action_writes_disk(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let dirty = cx
         .cx
-        .update(|app| view.read(app).model.active().unwrap().dirty);
+        .update(|app| view.read(app).model().active().unwrap().dirty);
     assert!(!dirty, "save resets dirty");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "!ab");
 }
@@ -141,12 +150,12 @@ fn undo_redo_actions(cx: &mut TestAppContext) {
     cx.dispatch_action(Undo);
     let after_undo = cx
         .cx
-        .update(|app| view.read(app).model.active().unwrap().doc.text());
+        .update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(after_undo, "");
     cx.dispatch_action(Redo);
     let after_redo = cx
         .cx
-        .update(|app| view.read(app).model.active().unwrap().doc.text());
+        .update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(after_redo, "xy");
 }
 
@@ -160,10 +169,10 @@ fn page_up_down_moves_by_page(cx: &mut TestAppContext) {
         .update_window_entity(&view, |ws, window, _| ws.page_lines(window));
     assert!(page >= 1);
     cx.simulate_keystrokes("pagedown");
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, page);
     cx.simulate_keystrokes("pageup");
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 0);
 }
 
@@ -177,7 +186,7 @@ fn click_positions_caret(cx: &mut TestAppContext) {
     // 2.5 → 2), x = 3.2 символа (round → 3).
     cx.simulate_click(grid.at(2.5, 3.2), Modifiers::default());
     let (line, col) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.cursor_line(), tab.cursor_col())
     });
     assert_eq!((line, col), (2, 3));
@@ -195,7 +204,7 @@ fn shift_click_extends_selection(cx: &mut TestAppContext) {
         shift: true,
         ..Default::default()
     });
-    let sel = cx.cx.update(|app| view.read(app).model.active().unwrap().cursors.last().copied());
+    let sel = cx.cx.update(|app| view.read(app).model().active().unwrap().cursors.last().copied());
     // "alpha\nbeta\ngamma\n": строка1 col1 = позиция 7, строка2 col3 = 14.
     assert_eq!(sel, Some(Selection::range(7, 14)));
 }
@@ -209,7 +218,7 @@ fn mouse_drag_selects_range(cx: &mut TestAppContext) {
     cx.simulate_mouse_down(grid.at(0.5, 1.2), MouseButton::Left, mods);
     cx.simulate_mouse_move(grid.at(2.5, 3.2), Some(MouseButton::Left), mods);
     cx.simulate_mouse_up(grid.at(2.5, 3.2), MouseButton::Left, mods);
-    let sel = cx.cx.update(|app| view.read(app).model.active().unwrap().cursors.last().copied());
+    let sel = cx.cx.update(|app| view.read(app).model().active().unwrap().cursors.last().copied());
     // Строка 0 col 1 = 1; строка 2 col 3 = 14.
     assert_eq!(sel, Some(Selection::range(1, 14)));
 }
@@ -228,7 +237,7 @@ fn goto_line_dialog_jumps(cx: &mut TestAppContext) {
     assert_eq!(input, Some("42".to_string()));
     cx.simulate_keystrokes("enter");
     let (line, col, open) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.cursor_line(), tab.cursor_col(), view.read(app).goto_input.clone())
     });
     assert_eq!((line, col), (41, 0));
@@ -244,7 +253,7 @@ fn goto_line_escape_and_clamp(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("9 9 9");
     cx.simulate_keystrokes("escape");
     let (line, open) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.cursor_line(), view.read(app).goto_input.clone())
     });
     assert_eq!(line, 0, "escape leaves caret in place");
@@ -254,7 +263,7 @@ fn goto_line_escape_and_clamp(cx: &mut TestAppContext) {
     cx.dispatch_action(GoToLine);
     cx.simulate_keystrokes("9 9 9 enter");
     let (line, col) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.cursor_line(), tab.cursor_col())
     });
     assert_eq!((line, col), (3, 0));
@@ -282,11 +291,11 @@ fn cmd_click_adds_cursor_and_types(cx: &mut TestAppContext) {
         platform: true,
         ..Default::default()
     });
-    let count = cx.cx.update(|app| view.read(app).model.active().unwrap().cursors.len());
+    let count = cx.cx.update(|app| view.read(app).model().active().unwrap().cursors.len());
     assert_eq!(count, 2, "cmd+click adds a cursor");
     cx.simulate_keystrokes("z");
     let (text, cursors) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.cursors.clone())
     });
     assert_eq!(text, "zalpha\nbeta\nzgamma\n");
@@ -307,13 +316,13 @@ fn alt_drag_column_selection(cx: &mut TestAppContext) {
     cx.simulate_mouse_down(grid.at(0.5, 1.2), MouseButton::Left, mods);
     cx.simulate_mouse_move(grid.at(2.5, 3.2), Some(MouseButton::Left), mods);
     cx.simulate_mouse_up(grid.at(2.5, 3.2), MouseButton::Left, mods);
-    let cursors = cx.cx.update(|app| view.read(app).model.active().unwrap().cursors.clone());
+    let cursors = cx.cx.update(|app| view.read(app).model().active().unwrap().cursors.clone());
     // Строки 0..=2, выделение [1..3).
     assert_eq!(cursors.len(), 3);
     assert_eq!(cursors[0], Selection::range(1, 3));
     assert_eq!(cursors[2], Selection::range(13, 15));
     cx.simulate_keystrokes("X");
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     // Ввод ЗАМЕНЯЕТ выделение [1..3) в каждой строке блока.
     assert_eq!(text, "aXde\naXde\naXde\n");
 }
@@ -326,37 +335,23 @@ fn cmd_d_adds_next_match(cx: &mut TestAppContext) {
     cx.dispatch_action(AddNextMatch);
     cx.dispatch_action(AddNextMatch);
     let (count, primary) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.cursors.len(), *tab.primary())
     });
     assert_eq!(count, 2);
     assert_eq!(primary, Selection::range(8, 11));
     cx.simulate_keystrokes("Q");
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     // Ввод заменяет ВСЕ выделения (оба вхождения "foo").
     assert_eq!(text, "Q bar Q\nbaz foo\n");
 }
 
-/// Биндинги группы 3+4 как в main.rs (в тестах main() не запускается,
-/// keymap приложения пуст — регистрируем явно для E2E-проверки клавиш).
+/// Биндинги как в main.rs (в тестах main() не запускается, keymap
+/// приложения пуст — регистрируем явно для E2E-проверки клавиш).
+/// 8.5: единый источник keymap::KEYMAP — тесты гоняют РЕАЛЬНУЮ
+/// раскладку (справочник и биндинги не расходятся).
 fn bind_app_keys(cx: &mut gpui::App) {
-    use gpui::KeyBinding;
-    cx.bind_keys([
-        KeyBinding::new("cmd-z", Undo, None),
-        KeyBinding::new("cmd-g", GoToLine, None),
-        KeyBinding::new("cmd-d", AddNextMatch, None),
-        KeyBinding::new("cmd-f2", ToggleBookmark, None),
-        KeyBinding::new("f2", NextBookmark, None),
-        // Поиск (6): панель в файле / по вкладкам.
-        KeyBinding::new("cmd-f", FindInFile, None),
-        KeyBinding::new("cmd-shift-f", FindInTabs, None),
-        // Дерево воркспейса (7.2): те же биндинги, что в main.rs.
-        KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
-        KeyBinding::new("cmd-n", NewFile, None),
-        KeyBinding::new("cmd-shift-n", NewFolder, None),
-        KeyBinding::new("shift-f6", RenameNode, None),
-        KeyBinding::new("cmd-backspace", DeleteNode, None),
-    ]);
+    crate::keymap::bind_all(cx);
 }
 
 /// 4.3: Cmd+D через РЕАЛЬНЫЙ путь клавиш (keybinding → действие),
@@ -368,10 +363,10 @@ fn cmd_d_keybinding_path(cx: &mut TestAppContext) {
     let grid = MouseGrid::of(cx, &view);
     // Клик в середину слова "bar" (колонка 5).
     cx.simulate_click(grid.at(0.5, 5.2), Modifiers::default());
-    let head = cx.cx.update(|app| view.read(app).model.active().unwrap().primary().head());
+    let head = cx.cx.update(|app| view.read(app).model().active().unwrap().primary().head());
     assert_eq!(head, 5, "каретка внутри слова");
     cx.simulate_keystrokes("cmd-d");
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(4, 7), "Cmd+D выделил слово");
 }
 
@@ -407,7 +402,7 @@ fn double_click_selects_word(cx: &mut TestAppContext) {
             click_count: click,
         });
     }
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(4, 7), "двойной клик — слово");
     // Тройной клик по строке 1 — вся строка.
     for click in 1..=3 {
@@ -425,7 +420,7 @@ fn double_click_selects_word(cx: &mut TestAppContext) {
             click_count: click,
         });
     }
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(12, 15), "тройной клик — строка с терминатором");
 }
 
@@ -435,10 +430,10 @@ fn double_click_selects_word(cx: &mut TestAppContext) {
 fn status_bar_uses_primary_cursor(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "status-multi", "one\ntwo\n");
     cx.update_window_entity(&view, |ws, _window, _| {
-        let tab = ws.model.active_mut().unwrap();
+        let tab = ws.model_mut().active_mut().unwrap();
         tab.set_cursors(vec![Selection::caret(0), Selection::caret(4)]);
     });
-    let text = cx.cx.update(|app| view.read(app).status_bar_text());
+    let text = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(text.contains("Ln 2, Col 1"), "got: {text}");
     assert!(text.contains("2 cursors"), "got: {text}");
 }
@@ -460,7 +455,7 @@ fn drag_partial_last_line_regression(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(grid.at(30.5, 38.2), Some(MouseButton::Left), mods);
     cx.simulate_mouse_up(grid.at(30.5, 38.2), MouseButton::Left, mods);
     let (sel, line, col) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (*tab.primary(), tab.cursor_line(), tab.cursor_col())
     });
     assert_eq!((line, col), (30, 38), "голова на строке 31, колонка 38");
@@ -485,7 +480,7 @@ fn drag_partial_last_line_regression(cx: &mut TestAppContext) {
 fn selection_background_hugs_segment_not_line(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "sel-paint", "0123456789\nabcdefghij\n");
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.model
+        ws.model_mut()
             .active_mut()
             .unwrap()
             .set_cursors(vec![Selection::range(2, 8)]);
@@ -528,23 +523,23 @@ fn selection_background_hugs_segment_not_line(cx: &mut TestAppContext) {
 fn bookmark_actions_navigate(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "bookmarks", "a\nb\nc\nd\n");
     cx.update_window_entity(&view, |ws, _w, _| {
-        ws.model.active_mut().unwrap().toggle_bookmark_at(1);
-        ws.model.active_mut().unwrap().toggle_bookmark_at(3);
+        ws.model_mut().active_mut().unwrap().toggle_bookmark_at(1);
+        ws.model_mut().active_mut().unwrap().toggle_bookmark_at(3);
     });
     cx.dispatch_action(NextBookmark); // со строки 0 → 1
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 1);
     cx.dispatch_action(NextBookmark); // → 3
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 3);
     cx.dispatch_action(PrevBookmark); // → 1
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 1);
     // Toggle на строке главной каретки (1) снимает закладку.
     cx.dispatch_action(ToggleBookmark);
     let bms = cx
         .cx
-        .update(|app| view.read(app).model.active().unwrap().bookmarked_lines());
+        .update(|app| view.read(app).model().active().unwrap().bookmarked_lines());
     assert_eq!(bms, vec![3]);
 }
 
@@ -554,19 +549,19 @@ fn bookmark_actions_navigate(cx: &mut TestAppContext) {
 fn bookmarks_survive_undo_gui(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "bm-undo", "one\ntwo\n");
     cx.update_window_entity(&view, |ws, _w, _| {
-        ws.model.active_mut().unwrap().toggle_bookmark_at(1);
+        ws.model_mut().active_mut().unwrap().toggle_bookmark_at(1);
     });
     cx.simulate_keystrokes("up"); // каретка на строку 0
     cx.simulate_keystrokes("N enter"); // новая строка сверху
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "N\none\ntwo\n");
     let bm = cx
         .cx
-        .update(|app| view.read(app).model.active().unwrap().bookmarked_lines());
+        .update(|app| view.read(app).model().active().unwrap().bookmarked_lines());
     assert_eq!(bm, vec![2], "bookmark follows content down");
     cx.dispatch_action(Undo);
     let (text, bm) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.bookmarked_lines())
     });
     assert_eq!(text, "one\ntwo\n");
@@ -585,7 +580,7 @@ fn fold_all_unfold_all_actions(cx: &mut TestAppContext) {
     cx.dispatch_action(FoldAll);
     let (folded_count, visible) = cx.cx.update(|app| {
         let ws = view.read(app);
-        let tab = ws.model.active().unwrap();
+        let tab = ws.model().active().unwrap();
         (tab.doc.line_meta().folded_count(), ws.visible_len())
     });
     assert_eq!(folded_count, 2, "оба блока свернуты");
@@ -602,12 +597,12 @@ fn fold_all_unfold_all_actions(cx: &mut TestAppContext) {
 fn click_after_fold_lands_on_visible_line(cx: &mut TestAppContext) {
     let code = "fn a() {\n    b();\n    c();\n}\ntail\n";
     let (view, cx, _path) = editor_with_file(cx, "fold-click", code);
-    cx.update_window_entity(&view, |ws, _w, _| ws.model.active_mut().unwrap().toggle_fold(0));
+    cx.update_window_entity(&view, |ws, _w, _| ws.model_mut().active_mut().unwrap().toggle_fold(0));
     let grid = MouseGrid::of(cx, &view);
     // Клик по «второй видимой строке» — это real-строка 3 ("}"),
     // хотя до свёртывания на этом месте была строка 1.
     cx.simulate_click(grid.at(1.5, 1.2), Modifiers::default());
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 3);
 }
 
@@ -616,10 +611,10 @@ fn click_after_fold_lands_on_visible_line(cx: &mut TestAppContext) {
 fn goto_hidden_line_jumps_to_fold_header(cx: &mut TestAppContext) {
     let code = "fn a() {\n    b();\n    c();\n}\ntail\n";
     let (view, cx, _path) = editor_with_file(cx, "fold-goto", code);
-    cx.update_window_entity(&view, |ws, _w, _| ws.model.active_mut().unwrap().toggle_fold(0));
+    cx.update_window_entity(&view, |ws, _w, _| ws.model_mut().active_mut().unwrap().toggle_fold(0));
     cx.dispatch_action(GoToLine);
     cx.simulate_keystrokes("2 enter"); // строка 2 скрыта телом фолда 0
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 0, "caret lands on the fold header");
 }
 
@@ -628,16 +623,16 @@ fn goto_hidden_line_jumps_to_fold_header(cx: &mut TestAppContext) {
 fn sort_lines_action_on_selection(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "sort", "h\npear\napple\nbanana\nf");
     cx.update_window_entity(&view, |ws, _w, _| {
-        let tab = ws.model.active_mut().unwrap();
+        let tab = ws.model_mut().active_mut().unwrap();
         tab.set_caret_at(1, 0);
         tab.select_to(3, 3); // строки 1..=3
     });
     cx.dispatch_action(SortAsc);
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "h\napple\nbanana\npear\nf");
     // Undo через действие — операция шла через History.
     cx.dispatch_action(Undo);
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "h\npear\napple\nbanana\nf");
 }
 
@@ -669,7 +664,7 @@ fn close_tab_action_closes_clean_tab(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "close", "content");
     cx.dispatch_action(CloseTab);
     cx.run_until_parked();
-    assert!(cx.cx.update(|app| view.read(app).model.is_empty()));
+    assert!(cx.cx.update(|app| view.read(app).model().is_empty()));
 }
 
 /// D11.2 (identity-мапа): без фолдов кэш видимых строк — тождественный
@@ -683,7 +678,7 @@ fn fold_view_identity_survives_edits(cx: &mut TestAppContext) {
     let identity = |cx: &gpui::VisualTestContext| {
         cx.cx.update(|app| {
             matches!(
-                view.read(app).fold_view,
+                view.read(app).panes[0].fold_view,
                 Some((_, crate::workspace::FoldView::Identity))
             )
         })
@@ -691,7 +686,7 @@ fn fold_view_identity_survives_edits(cx: &mut TestAppContext) {
     let visible = |cx: &gpui::VisualTestContext| {
         cx.cx.update(|app| {
             let ws = view.read(app);
-            (ws.visible_len(), ws.model.active().unwrap().doc.len_lines())
+            (ws.visible_len(), ws.model().active().unwrap().doc.len_lines())
         })
     };
     assert!(identity(cx), "после открытия — identity");
@@ -719,7 +714,7 @@ fn fold_view_transitions_follow_fold_count(cx: &mut TestAppContext) {
     let (view, cx, _path) = editor_with_file(cx, "fold-trans", "fn a() {\n    b();\n}\n");
     cx.run_until_parked();
     let kind = |cx: &gpui::VisualTestContext| {
-        cx.cx.update(|app| match &view.read(app).fold_view {
+        cx.cx.update(|app| match &view.read(app).panes[0].fold_view {
             Some((_, crate::workspace::FoldView::Identity)) => 0,
             Some((_, crate::workspace::FoldView::Mapped { .. })) => 1,
             None => 2,
@@ -749,7 +744,7 @@ fn fold_view_transitions_follow_fold_count(cx: &mut TestAppContext) {
     // (флаг исчез), undo вернул строку с флагом → мапа снова mapped.
     let (view2, cx, _path) = editor_with_file(cx, "fold-undo", "fn a() {\n    b();\n}\n");
     cx.update_window_entity(&view2, |ws, _w, _| {
-        ws.model.active_mut().unwrap().toggle_fold(0);
+        ws.model_mut().active_mut().unwrap().toggle_fold(0);
         // Мутация модели без notify не рендерит — кэш мапы обновляем
         // явно (в живом приложении это делает Render::render).
         ws.ensure_fold_view();
@@ -776,7 +771,7 @@ fn fold_view_transitions_follow_fold_count(cx: &mut TestAppContext) {
         let ws = view2.read(app);
         (
             ws.visible_len(),
-            matches!(ws.fold_view, Some((_, crate::workspace::FoldView::Mapped { .. }))),
+            matches!(ws.panes[0].fold_view, Some((_, crate::workspace::FoldView::Mapped { .. }))),
         )
     });
     assert!(mapped, "undo восстановил folded-флаг — мапа материальная");
@@ -811,7 +806,7 @@ fn editor_with_named_file<'a>(
         ws.open_paths(std::slice::from_ref(&path), window, cx);
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     (view, cx, path)
 }
 
@@ -906,7 +901,7 @@ fn language_picker_manual_yaml(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     // Язык применился: статус-бар + цветовые сегменты строки «key: value».
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(status.contains("|  YAML"), "got: {status}");
     assert!(
         cx.debug_bounds("seg:1:1").is_some(),
@@ -926,7 +921,7 @@ fn python_file_highlighted_automatically(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(status.contains("|  Python"), "got: {status}");
     assert!(
         cx.debug_bounds("seg:0:1").is_some(),
@@ -949,7 +944,7 @@ fn over_threshold_file_editable_declined(cx: &mut TestAppContext) {
     assert!(cx.has_pending_prompt(), "вопрос показан при открытии");
     cx.simulate_prompt_answer("Keep off");
     cx.run_until_parked();
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(
         status.contains("Syntax highlighting is off"),
         "got: {status}"
@@ -957,19 +952,19 @@ fn over_threshold_file_editable_declined(cx: &mut TestAppContext) {
     // Редактирование полноценно: ввод работает, документ меняется.
     cx.simulate_keystrokes("z");
     let text_head = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+        view.read(app).model().active().unwrap().doc.slice_str(0, 1)
     });
     assert_eq!(text_head, "z");
     cx.dispatch_action(Undo); // cmd-z биндинг в gpui::test пуст — действием
     cx.run_until_parked();
     let text_head = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+        view.read(app).model().active().unwrap().doc.slice_str(0, 1)
     });
     assert_eq!(text_head, "a", "undo работает");
     // Подсветки нет: движок без синтаксиса (сегменты может резать
     // только каретка — после ввода она в col 1). Язык — Plain Text.
     let (syntax, label) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.highlight.syntax_name().map(str::to_string), tab.language_label().to_string())
     });
     assert_eq!(syntax, None);
@@ -990,17 +985,17 @@ fn over_threshold_prompt_enable_highlights_any_size(cx: &mut TestAppContext) {
     cx.simulate_prompt_answer("Enable");
     cx.run_until_parked();
     let (label, syntax) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.language_label().to_string(), tab.highlight.syntax_name().map(str::to_string))
     });
     assert_eq!(label, "Rust", "язык определился после согласия");
     assert_eq!(syntax.as_deref(), Some("Rust"), "движок активен для 20 МБ+");
     // Статус-бар сообщает о включении; редактирование работает.
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(status.contains("enabled for large"), "got: {status}");
     cx.simulate_keystrokes("z");
     let head = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().doc.slice_str(0, 1)
+        view.read(app).model().active().unwrap().doc.slice_str(0, 1)
     });
     assert_eq!(head, "z");
 }
@@ -1020,7 +1015,7 @@ fn csv_columns_render_colored_segments(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(status.contains("|  CSV"), "got: {status}");
     // Строка 0 «name,count,note»: каретка в col 0 режет первый сегмент
     // (без пустого — caret_before на «name»); чередование цветное
@@ -1070,7 +1065,7 @@ fn csv_sticky_header_pins_and_click_scrolls_to_top(cx: &mut TestAppContext) {
     // ПОСЛЕ render — качаем второй кадр (в живом окне его даёт любое
     // следующее событие).
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
+        ws.panes[0].scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
         cx.notify();
     });
     cx.run_until_parked();
@@ -1105,7 +1100,7 @@ fn csv_sticky_header_pins_and_click_scrolls_to_top(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(header), Modifiers::default());
     cx.run_until_parked();
     let offset_y = cx.update_window_entity(&view, |ws, _, _| {
-        f32::from(ws.scroll.0.borrow().base_handle.offset().y)
+        f32::from(ws.panes[0].scroll.0.borrow().base_handle.offset().y)
     });
     assert_eq!(offset_y, 0.0, "прокрутка к началу");
     assert!(
@@ -1127,7 +1122,7 @@ fn csv_sticky_header_partial_and_plain_files(cx: &mut TestAppContext) {
     let lines: String = (0..120).map(|i| format!("line{i:03}\n")).collect();
     let (view, cx, _p) = editor_with_named_file(cx, "sticky-plain", "data.txt", &lines);
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
+        ws.panes[0].scroll.scroll_to_item(60, gpui::ScrollStrategy::Top);
         cx.notify();
     });
     cx.run_until_parked();
@@ -1149,7 +1144,7 @@ fn csv_sticky_header_partial_and_plain_files(cx: &mut TestAppContext) {
     cx.run_until_parked();
     // Частичный показ строки 0 (−половина строки) — дубля нет.
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll
+        ws.panes[0].scroll
             .0
             .borrow()
             .base_handle
@@ -1163,7 +1158,7 @@ fn csv_sticky_header_partial_and_plain_files(cx: &mut TestAppContext) {
     );
     // Полный уход (строка 0 целиком вне вида) — шапка есть.
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll
+        ws.panes[0].scroll
             .0
             .borrow()
             .base_handle
@@ -1188,7 +1183,7 @@ fn search_state(
         view.read(app)
             .search
             .as_ref()
-            .map(|sp| (sp.query.clone(), sp.counter()))
+            .map(|sp| (sp.query.clone(), sp.counter("No results")))
     })
 }
 
@@ -1222,7 +1217,7 @@ fn cmd_f_opens_panel_and_typing_goes_to_query(cx: &mut TestAppContext) {
     let (text, query) = cx.cx.update(|app| {
         let ws = view.read(app);
         (
-            ws.model.active().unwrap().doc.text(),
+            ws.model().active().unwrap().doc.text(),
             ws.search.as_ref().unwrap().query.clone(),
         )
     });
@@ -1293,11 +1288,11 @@ fn find_navigation_and_escape(cx: &mut TestAppContext) {
     cx.run_until_parked();
     // «x » два вхождения: строки 0 и 2. Каретка в 0 → текущее 1-е.
     cx.simulate_keystrokes("enter");
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(0, 2), "первое совпадение выделено");
     cx.simulate_keystrokes("enter");
     let (sel, line) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (*tab.primary(), tab.cursor_line())
     });
     assert_eq!(line, 2, "второе совпадение — строка 2");
@@ -1305,11 +1300,11 @@ fn find_navigation_and_escape(cx: &mut TestAppContext) {
     assert_eq!(sel, Selection::range(13, 15), "«x two»: x на char 13");
     // Цикличность: след от последнего — первое.
     cx.simulate_keystrokes("enter");
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 0, "циклически вернулись к первому");
     // Shift+Enter — назад.
     cx.simulate_keystrokes("shift-enter");
-    let line = cx.cx.update(|app| view.read(app).model.active().unwrap().cursor_line());
+    let line = cx.cx.update(|app| view.read(app).model().active().unwrap().cursor_line());
     assert_eq!(line, 2, "shift+enter — предыдущее");
     // Счётчик отслеживает.
     let (_, counter) = search_state(cx, &view).unwrap();
@@ -1321,7 +1316,7 @@ fn find_navigation_and_escape(cx: &mut TestAppContext) {
     let open = cx.cx.update(|app| view.read(app).search.is_none());
     assert!(open, "панель закрыта");
     cx.simulate_keystrokes("z");
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "x one\nmiddle\nztwo\n", "фокус вернулся в редактор");
 }
 
@@ -1347,7 +1342,7 @@ fn regex_dates_find_scenario(cx: &mut TestAppContext) {
     assert_eq!(counter, "1/2", "две полные даты");
     // Enter: каретка на первую дату (char 4..14).
     cx.simulate_keystrokes("enter");
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(4, 14));
     // Строка 0: «due » + дата (выделение и hit дают ОДНИ границы —
     // сегмент не дублируется) + « and » + дата = 4 сегмента, покрывают
@@ -1399,14 +1394,14 @@ fn replace_all_and_undo(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(all), Modifiers::default());
     cx.run_until_parked();
     let (text, dirty) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.dirty)
     });
     assert_eq!(text, "QQ bar QQ\nbaz QQ\n");
     assert!(dirty);
     // Undo одним шагом возвращает исходник.
     cx.dispatch_action(Undo);
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "foo bar foo\nbaz foo\n");
     // После undo документ снова содержит «foo» — счётчик видит их.
     let (_, counter) = search_state(cx, &view).unwrap();
@@ -1432,7 +1427,7 @@ fn replace_one_by_one(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(one), Modifiers::default());
     cx.run_until_parked();
     let (text, caret) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (tab.doc.text(), tab.primary().head())
     });
     assert_eq!(text, "X bb aa\n", "первое заменено");
@@ -1440,11 +1435,11 @@ fn replace_one_by_one(cx: &mut TestAppContext) {
     // Второе нажатие — заменяет следующее (сдвиги учтены пересчётом).
     cx.simulate_click(center_of(one), Modifiers::default());
     cx.run_until_parked();
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "X bb X\n");
     // Undo откатывает по одному шагу на замену.
     cx.dispatch_action(Undo);
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "X bb aa\n");
 }
 
@@ -1459,11 +1454,11 @@ fn tabs_search_click_navigates(cx: &mut TestAppContext) {
     std::mem::forget(dir);
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut ws = Workspace::new(cx);
-        ws.model.open_path(&a).unwrap();
-        ws.model.open_path(&b).unwrap();
+        ws.model_mut().open_path(&a).unwrap();
+        ws.model_mut().open_path(&b).unwrap();
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-f");
     cx.run_until_parked();
@@ -1484,8 +1479,8 @@ fn tabs_search_click_navigates(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let (active, sel) = cx.cx.update(|app| {
         let ws = view.read(app);
-        let tab = ws.model.active().unwrap();
-        (ws.model.active_index(), *tab.primary())
+        let tab = ws.model().active().unwrap();
+        (ws.model().active_index(), *tab.primary())
     });
     assert_eq!(active, Some(1), "вкладка b активирована");
     // «nothing\n» = 8 char; «second » = 7 → needle с 15.
@@ -1506,10 +1501,10 @@ fn folder_search_replace_keeps_disk_intact(cx: &mut TestAppContext) {
     std::mem::forget(dir);
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut ws = Workspace::new(cx);
-        ws.model.open_path(&a).unwrap();
+        ws.model_mut().open_path(&a).unwrap();
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     cx.run_until_parked();
     // Панель → чип Folder: дефолт — папка активной вкладки (D13).
     cx.simulate_keystrokes("cmd-f");
@@ -1554,9 +1549,9 @@ fn folder_search_replace_keeps_disk_intact(cx: &mut TestAppContext) {
     let (tabs, dirties, texts) = cx.cx.update(|app| {
         let ws = view.read(app);
         (
-            ws.model.len(),
-            ws.model.tabs().iter().map(|t| t.dirty).collect::<Vec<_>>(),
-            ws.model.tabs().iter().map(|t| t.doc.text()).collect::<Vec<_>>(),
+            ws.model().len(),
+            ws.model().tabs().iter().map(|t| t.dirty).collect::<Vec<_>>(),
+            ws.model().tabs().iter().map(|t| t.doc.text()).collect::<Vec<_>>(),
         )
     });
     assert_eq!(tabs, 2, "b.txt открыт вкладкой");
@@ -1565,7 +1560,7 @@ fn folder_search_replace_keeps_disk_intact(cx: &mut TestAppContext) {
     assert_eq!(texts[1], "beta PIN twice\nPIN again\n");
     assert_eq!(std::fs::read(&b).unwrap(), before_b, "диск НЕ тронут");
     // Отчёт в статус-баре.
-    let status = cx.cx.update(|app| view.read(app).status_bar_text());
+    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(
         status.contains("Replaced 3 occurrence(s) in 2 file(s)"),
         "got: {status}"
@@ -1583,14 +1578,14 @@ fn folder_search_prefers_open_tab_content(cx: &mut TestAppContext) {
     std::mem::forget(dir);
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut ws = Workspace::new(cx);
-        ws.model.open_path(&a).unwrap();
+        ws.model_mut().open_path(&a).unwrap();
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     cx.run_until_parked();
     // Правим вкладку: слово, которого нет на диске.
     cx.simulate_keystrokes("z z z space");
-    let text = cx.cx.update(|app| view.read(app).model.active().unwrap().doc.text());
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
     assert_eq!(text, "zzz on-disk-old\n");
     // Folder-поиск по слову из ВКЛАДКИ.
     cx.update_window_entity(&view, |ws, window, cx| {
@@ -1624,8 +1619,8 @@ fn search_jump_scrolls_immediately_to_match_line(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     let (line, offset_y, page) = cx.update_window_entity(&view, |ws, window, _| {
         (
-            ws.model.active().unwrap().cursor_line(),
-            f32::from(ws.scroll.0.borrow().base_handle.offset().y),
+            ws.model().active().unwrap().cursor_line(),
+            f32::from(ws.panes[0].scroll.0.borrow().base_handle.offset().y),
             ws.page_lines(window),
         )
     });
@@ -1659,7 +1654,7 @@ fn search_magnifier_button_acts_as_enter(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(loupe), Modifiers::default());
     cx.run_until_parked();
     let (sel, line) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (*tab.primary(), tab.cursor_line())
     });
     assert_eq!(sel, Selection::range(0, 2), "лупа = Enter: первое «aa»");
@@ -1669,7 +1664,7 @@ fn search_magnifier_button_acts_as_enter(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(loupe), Modifiers::default());
     cx.run_until_parked();
     let (sel, line) = cx.cx.update(|app| {
-        let tab = view.read(app).model.active().unwrap();
+        let tab = view.read(app).model().active().unwrap();
         (*tab.primary(), tab.cursor_line())
     });
     assert_eq!(sel, Selection::range(9, 11), "второй клик — второе «aa»");
@@ -1677,7 +1672,7 @@ fn search_magnifier_button_acts_as_enter(cx: &mut TestAppContext) {
     // Третий — циклически к первому.
     cx.simulate_click(center_of(loupe), Modifiers::default());
     cx.run_until_parked();
-    let sel = cx.cx.update(|app| *view.read(app).model.active().unwrap().primary());
+    let sel = cx.cx.update(|app| *view.read(app).model().active().unwrap().primary());
     assert_eq!(sel, Selection::range(0, 2), "циклически к первому");
     // Tabs scope: лупа запускает поиск (аналог Enter).
     let (view2, cx, _p2) = {
@@ -1688,10 +1683,10 @@ fn search_magnifier_button_acts_as_enter(cx: &mut TestAppContext) {
         {
             let (view, cx) = cx.add_window_view(|_window, cx| {
                 let mut ws = Workspace::new(cx);
-                ws.model.open_path(&a).unwrap();
+                ws.model_mut().open_path(&a).unwrap();
                 ws
             });
-            cx.focus(&view);
+            focus_editor(&view, cx);
             (view, cx, a)
         }
     };
@@ -1727,13 +1722,13 @@ fn tabs_search_results_are_capped(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut ws = Workspace::new(cx);
         for i in 0..5 {
-            ws.model
+            ws.model_mut()
                 .open_path(root.join(format!("f{i}.txt")))
                 .unwrap();
         }
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-f");
     cx.run_until_parked();
@@ -1785,7 +1780,7 @@ fn workspace_window<'a>(
         ws.open_workspace_folder(&root, cx);
         ws
     });
-    cx.focus(&view);
+    focus_editor(&view, cx);
     cx.run_until_parked();
     (view, cx, root)
 }
@@ -1826,7 +1821,7 @@ fn workspace_tree_click_opens_and_expands(cx: &mut TestAppContext) {
     cx.simulate_click(center_of(idea), Modifiers::default());
     cx.run_until_parked();
     let tab_path = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().path.clone()
+        view.read(app).model().active().unwrap().path.clone()
     });
     assert_eq!(tab_path.as_deref(), Some(root.join("notes/idea.txt").as_path()));
 }
@@ -1892,7 +1887,7 @@ fn tree_rename_follows_open_tab(cx: &mut TestAppContext) {
     assert!(renamed.is_file(), "переименован на диске");
     assert!(!root.join("todo.txt").exists());
     let tab_path = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().path.clone()
+        view.read(app).model().active().unwrap().path.clone()
     });
     assert_eq!(tab_path.as_deref(), Some(renamed.as_path()), "вкладка следует за путём");
 }
@@ -1905,7 +1900,7 @@ fn tree_drag_and_drop_moves_file(cx: &mut TestAppContext) {
     // Открыть todo.txt вкладкой.
     cx.cx.update(|app| {
         view.update(app, |ws, cx| {
-            ws.model.open_path(root.join("todo.txt")).unwrap();
+            ws.model_mut().open_path(root.join("todo.txt")).unwrap();
             cx.notify();
         })
     });
@@ -1931,7 +1926,7 @@ fn tree_drag_and_drop_moves_file(cx: &mut TestAppContext) {
     assert!(moved.is_file(), "файл перемещен на диск");
     assert!(!root.join("todo.txt").exists());
     let tab_path = cx.cx.update(|app| {
-        view.read(app).model.active().unwrap().path.clone()
+        view.read(app).model().active().unwrap().path.clone()
     });
     assert_eq!(tab_path.as_deref(), Some(moved.as_path()), "вкладка у нового пути");
 }
@@ -2012,7 +2007,7 @@ fn editor_scrollbar_tracks_scroll(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let editor = cx.update_window_entity(&view, |ws, _w, _| ws.editor_bounds().expect("editor"));
-    let thumb = cx.debug_bounds("editor-vscroll-thumb").expect("ползунок отрисован");
+    let thumb = cx.debug_bounds("editor-vscroll-0-thumb").expect("ползунок отрисован");
     // Ползунок — в СВОЕЙ дорожке справа от текста (не перекрывает
     // его) и не выходит за ширину дорожки (TRACK_W).
     assert!(
@@ -2032,13 +2027,13 @@ fn editor_scrollbar_tracks_scroll(cx: &mut TestAppContext) {
 
     // Прокрутка вглубь — ползунок сместился вниз.
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll.scroll_to_item(150, gpui::ScrollStrategy::Top);
+        ws.panes[0].scroll.scroll_to_item(150, gpui::ScrollStrategy::Top);
         cx.notify();
     });
     cx.run_until_parked();
     cx.update_window_entity(&view, |_ws, _w, cx| cx.notify());
     cx.run_until_parked();
-    let thumb2 = cx.debug_bounds("editor-vscroll-thumb").expect("ползунок остался");
+    let thumb2 = cx.debug_bounds("editor-vscroll-0-thumb").expect("ползунок остался");
     assert!(
         f32::from(thumb2.origin.y) > f32::from(thumb.origin.y),
         "ползунок поехал вниз: {:?} → {:?}",
@@ -2052,7 +2047,7 @@ fn editor_scrollbar_tracks_scroll(cx: &mut TestAppContext) {
     cx.update_window_entity(&view2, |_ws, _w, cx| cx.notify());
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("editor-vscroll-thumb").is_none(),
+        cx.debug_bounds("editor-vscroll-0-thumb").is_none(),
         "короткий файл — без полосы"
     );
 }
@@ -2067,7 +2062,7 @@ fn editor_scrollbar_thumb_drag_scrolls(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window_entity(&view, |_ws, _w, cx| cx.notify());
     cx.run_until_parked();
-    let thumb = cx.debug_bounds("editor-vscroll-thumb").expect("ползунок отрисован");
+    let thumb = cx.debug_bounds("editor-vscroll-0-thumb").expect("ползунок отрисован");
 
     let mods = Modifiers::default();
     let start = center_of(thumb);
@@ -2078,8 +2073,8 @@ fn editor_scrollbar_thumb_drag_scrolls(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let (offset_y, caret) = cx.update_window_entity(&view, |ws, _w, _| {
-        let y = f32::from(ws.scroll.0.borrow().base_handle.offset().y);
-        let c = ws.model.active().unwrap().primary().head();
+        let y = f32::from(ws.panes[0].scroll.0.borrow().base_handle.offset().y);
+        let c = ws.model().active().unwrap().primary().head();
         (y, c)
     });
     assert!(offset_y < -1.0, "драг ползунка прокрутил список, offset.y = {offset_y}");
@@ -2101,11 +2096,11 @@ fn editor_horizontal_scroll(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let thumb = cx
-        .debug_bounds("editor-hscroll-thumb")
+        .debug_bounds("editor-hscroll-0-thumb")
         .expect("ползунок горизонтального скролла отрисован");
     // Ползунок — в своей дорожке ПОД текстом (не перекрывает его).
     let before = cx.update_window_entity(&view, |ws, _w, _| {
-        (ws.h_scroll.max_offset().width, ws.editor_bounds().expect("editor"))
+        (ws.panes[0].h_scroll.max_offset().width, ws.editor_bounds().expect("editor"))
     });
     assert!(
         f32::from(thumb.top()) >= f32::from(before.1.bottom()) - 0.5,
@@ -2130,7 +2125,7 @@ fn editor_horizontal_scroll(cx: &mut TestAppContext) {
 
     let (offset_x, bounds_x) = cx.update_window_entity(&view, |ws, _w, _| {
         (
-            f32::from(ws.h_scroll.offset().x),
+            f32::from(ws.panes[0].h_scroll.offset().x),
             f32::from(ws.editor_bounds().expect("editor").origin.x),
         )
     });
@@ -2146,7 +2141,7 @@ fn editor_horizontal_scroll(cx: &mut TestAppContext) {
     cx.update_window_entity(&view2, |_ws, _w, cx| cx.notify());
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("editor-hscroll-thumb").is_none(),
+        cx.debug_bounds("editor-hscroll-0-thumb").is_none(),
         "узкий контент — без горизонтальной полосы"
     );
 }
@@ -2167,8 +2162,8 @@ fn wheel_axes_are_separated(cx: &mut TestAppContext) {
     // Обе оси прокручиваемы (иначе тест ничего не проверяет).
     let (hmax, vmax) = cx.update_window_entity(&view, |ws, _w, _| {
         (
-            f32::from(ws.h_scroll.max_offset().width),
-            f32::from(ws.scroll.0.borrow().base_handle.max_offset().height),
+            f32::from(ws.panes[0].h_scroll.max_offset().width),
+            f32::from(ws.panes[0].scroll.0.borrow().base_handle.max_offset().height),
         )
     });
     assert!(hmax > 0.0, "горизонталь прокручиваема");
@@ -2191,8 +2186,8 @@ fn wheel_axes_are_separated(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let (vy, hx) = cx.update_window_entity(&view, |ws, _w, _| {
         (
-            f32::from(ws.scroll.0.borrow().base_handle.offset().y),
-            f32::from(ws.h_scroll.offset().x),
+            f32::from(ws.panes[0].scroll.0.borrow().base_handle.offset().y),
+            f32::from(ws.panes[0].h_scroll.offset().x),
         )
     });
     assert!(vy != 0.0, "текст прокрутился по вертикали");
@@ -2208,8 +2203,8 @@ fn wheel_axes_are_separated(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let (vy2, hx2) = cx.update_window_entity(&view, |ws, _w, _| {
         (
-            f32::from(ws.scroll.0.borrow().base_handle.offset().y),
-            f32::from(ws.h_scroll.offset().x),
+            f32::from(ws.panes[0].scroll.0.borrow().base_handle.offset().y),
+            f32::from(ws.panes[0].h_scroll.offset().x),
         )
     });
     assert!(hx2 != 0.0, "горизонтальная полоса прокрутилась");
@@ -2239,7 +2234,7 @@ fn highlight_catches_up_after_big_jump(cx: &mut TestAppContext) {
     // Резкий прыжок вглубь (один scroll_to_item — как флик трекпада;
     // deferred-скролл применяется в prepaint этого же кадра).
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
+        ws.panes[0].scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
         cx.notify();
     });
     cx.run_until_parked();
@@ -2254,7 +2249,7 @@ fn highlight_catches_up_after_big_jump(cx: &mut TestAppContext) {
         covered = cx.update_window_entity(&view, |ws, _w, _| {
             let b = ws.editor_bounds().expect("editor");
             let first = ws.visible_line_at_y(f32::from(b.origin.y) + 1.0).unwrap();
-            let tab = ws.model.active().unwrap();
+            let tab = ws.model().active().unwrap();
             (0..5_usize)
                 .map(|i| first + i)
                 .all(|vis| tab.highlight.spans(ws.visible_to_real(vis)).is_some())
@@ -2294,7 +2289,7 @@ fn background_highlight_builds_checkpoints(cx: &mut TestAppContext) {
             .advance_clock(std::time::Duration::from_millis(25));
         cx.run_until_parked();
         cps = cx.update_window_entity(&view, |ws, _w, _| {
-            ws.model.active().unwrap().highlight.checkpoint_lines()
+            ws.model().active().unwrap().highlight.checkpoint_lines()
         });
         if cps.contains(&2048) {
             break; // ходка дошла глубже 2k — достаточно
@@ -2309,7 +2304,7 @@ fn background_highlight_builds_checkpoints(cx: &mut TestAppContext) {
     // строк) — несколько кадров 2 мс-бюджета; гоняем кадры как vsync
     // (в живом окне — request_animation_frame, тест качает явно).
     cx.update_window_entity(&view, |ws, _w, cx| {
-        ws.scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
+        ws.panes[0].scroll.scroll_to_item(2_500, gpui::ScrollStrategy::Top);
         cx.notify();
     });
     cx.run_until_parked();
@@ -2320,7 +2315,7 @@ fn background_highlight_builds_checkpoints(cx: &mut TestAppContext) {
         covered = cx.update_window_entity(&view, |ws, _w, _| {
             let b = ws.editor_bounds().expect("editor");
             let first = ws.visible_line_at_y(f32::from(b.origin.y) + 1.0).unwrap();
-            let tab = ws.model.active().unwrap();
+            let tab = ws.model().active().unwrap();
             (0..5_usize)
                 .map(|i| first + i)
                 .all(|vis| tab.highlight.spans(ws.visible_to_real(vis)).is_some())
@@ -2330,4 +2325,371 @@ fn background_highlight_builds_checkpoints(cx: &mut TestAppContext) {
         }
     }
     assert!(covered, "прыжок покрыт сразу после фоновой ходки");
+}
+
+// ---- Split view (8.1/D15.1) ----
+
+/// 8.1: split создаёт независимые панели с независимыми вкладками;
+/// Cmd+\ (dispatch) активирует новую панель; открытие файла попадает в
+/// активную панель; максимум 4 панели.
+#[gpui::test]
+fn split_view_panes_have_independent_tabs(cx: &mut TestAppContext) {
+    let dir = TempDir::new("split-tabs");
+    let a = dir.write("a.txt", "alpha\n");
+    let b = dir.write("b.txt", "beta\n");
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        let mut ws = Workspace::new(cx);
+        ws.model_mut().open_path(&a).unwrap();
+        ws
+    });
+    focus_editor(&view, cx);
+    cx.run_until_parked();
+
+    // Split: панель 1 пуста и активна.
+    cx.dispatch_action(SplitEditor);
+    cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.panes.len(), 2);
+        assert_eq!(ws.active_pane, 1);
+        assert!(ws.panes[1].model.is_empty());
+        assert_eq!(ws.panes[0].model.len(), 1, "вкладки не переносятся");
+    });
+
+    // Открытие в активную панель.
+    cx.cx.update(|app| {
+        view.update(app, |ws, cx| {
+            ws.model_mut().open_path(&b).unwrap();
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.panes[1].model.len(), 1, "файл открыт в панели 1");
+        assert_eq!(
+            ws.panes[1].model.active().unwrap().path.as_deref(),
+            Some(b.as_path())
+        );
+        assert_eq!(ws.panes[0].model.active().unwrap().path.as_deref(), Some(a.as_path()));
+    });
+
+    // Ввод идёт в активную панель (панель 1 — вкладка b).
+    cx.simulate_keystrokes("x");
+    cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.panes[1].model.active().unwrap().doc.text(), "xbeta\n");
+        assert_eq!(ws.panes[0].model.active().unwrap().doc.text(), "alpha\n");
+    });
+
+    // Максимум 4 панели: дальнейшие split — no-op.
+    cx.dispatch_action(SplitEditor);
+    cx.dispatch_action(SplitEditor);
+    cx.dispatch_action(SplitEditor);
+    cx.cx.update(|app| assert_eq!(view.read(app).panes.len(), 4));
+}
+
+/// 8.1: закрытие панели (Cmd+Shift+\) — чистая панель закрывается
+/// сразу; активной становится соседняя; последняя панель не закрывается.
+#[gpui::test]
+fn close_pane_keeps_last_and_activates_neighbor(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_file(cx, "close-pane", "hello\n");
+    cx.dispatch_action(SplitEditor);
+    cx.cx.update(|app| assert_eq!(view.read(app).panes.len(), 2));
+
+    // Закрытие пустой панели 1 — без диалогов.
+    cx.dispatch_action(ClosePane);
+    cx.run_until_parked();
+    cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.panes.len(), 1);
+        assert_eq!(ws.active_pane, 0);
+    });
+
+    // Последняя панель не закрывается.
+    cx.dispatch_action(ClosePane);
+    cx.cx.update(|app| assert_eq!(view.read(app).panes.len(), 1));
+}
+
+/// 8.1: синхронная прокрутка — прокрутка одной панели выравнивает
+/// первую видимую строку другой (ToggleSyncScroll + интерактивный
+/// скролл колеса).
+#[gpui::test]
+fn sync_scroll_aligns_top_line(cx: &mut TestAppContext) {
+    // Длинный файл — прокрутка реальна.
+    let content: String = (0..500).map(|i| format!("line {i}\n")).collect();
+    let (view, cx, _p) = editor_with_file(cx, "sync-scroll", &content);
+    // Вторая панель: тот же файл открыт заново (независимая вкладка).
+    let path = _p.clone();
+    cx.dispatch_action(SplitEditor);
+    cx.cx.update(|app| {
+        view.update(app, |ws, cx| {
+            ws.model_mut().open_path(&path).unwrap();
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+
+    // Синхронизация выключена: прокрутка панели 0 не трогает панель 1.
+    let y_before = cx.cx.update(|app| {
+        f32::from(
+            view.read(app).panes[1]
+                .scroll
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+        )
+    });
+    cx.cx.update(|app| {
+        view.update(app, |ws, cx| {
+            let ws_scroll = ws.panes[0].scroll.0.borrow().base_handle.clone();
+            ws_scroll.set_offset(point(px(0.0), px(-100.0 * LINE_HEIGHT)));
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    cx.cx.update(|app| {
+        let y = f32::from(
+            view.read(app).panes[1]
+                .scroll
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+        );
+        assert_eq!(y, y_before, "без sync панель 1 не двигается");
+    });
+
+    // Включаем и прокручиваем через wheel-обработчик панели 0
+    // (интерактивный путь: on_editor_wheel_pane → sync_scroll_from);
+    // +150 строк вниз от top line 100.
+    cx.dispatch_action(ToggleSyncScroll);
+    cx.update_window_entity(&view, |ws, window, cx| {
+        let ev = gpui::ScrollWheelEvent {
+            position: point(px(0.0), px(0.0)),
+            // Прокрутка ВНИЗ — delta отрицателен (offset.y уменьшается;
+            // семантика gpui: scrolled = -offset.y).
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-150.0 * LINE_HEIGHT))),
+            modifiers: Default::default(),
+            touch_phase: Default::default(),
+        };
+        ws.on_editor_wheel_pane(0, &ev, window, cx);
+    });
+    cx.run_until_parked();
+    // Ловушка deferred-скролла (D12.5): scroll_to_item применяется в
+    // prepaint ПОСЛЕ render — качаем второй кадр (как в тестах CSV).
+    cx.update_window_entity(&view, |_ws, _w, cx| cx.notify());
+    cx.run_until_parked();
+    // Панель 1 выровнена по первой видимой строке панели 0 (строка
+    // 250): deferred scroll_to_item применился на следующей отрисовке.
+    let y1 = cx.cx.update(|app| {
+        f32::from(
+            view.read(app).panes[1]
+                .scroll
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+        )
+    });
+    assert!(
+        (y1 + 250.0 * LINE_HEIGHT).abs() < LINE_HEIGHT,
+        "панель 1 следует за панелью 0 (offset.y={y1})"
+    );
+}
+
+/// 8.2: переключение темы — выбор меняется, попадает в состояние
+/// сессии (переживает перезапуск); разрешение выбора — юнит-тесты
+/// theme.rs (глобальная палитра гоняется между параллельными
+/// тестовыми окнами — здесь проверяем детерминированную часть).
+#[gpui::test]
+fn theme_switch_applies_and_persists(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_file(cx, "theme", "hello\n");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.cx.update(|app| view.read(app).theme_kind),
+        crate::theme::ThemeKind::System,
+        "дефолт — системная"
+    );
+
+    cx.dispatch_action(ThemeDark);
+    cx.run_until_parked();
+    let saved = cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.theme_kind, crate::theme::ThemeKind::Dark);
+        ws.session_state(None).theme.expect("тема в сессии")
+    });
+    assert_eq!(saved, "dark");
+
+    cx.dispatch_action(ThemeLight);
+    cx.run_until_parked();
+    let saved = cx.cx.update(|app| {
+        let ws = view.read(app);
+        assert_eq!(ws.theme_kind, crate::theme::ThemeKind::Light);
+        ws.session_state(None).theme.expect("тема в сессии")
+    });
+    assert_eq!(saved, "light");
+}
+
+/// 8.3: зум шрифта применяется немедленно (высота строки растёт) и
+/// сохраняется в сессии; сброс возвращает дефолт.
+#[gpui::test]
+fn font_zoom_applies_immediately_and_persists(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_file(cx, "font-zoom", "hello\n");
+    cx.run_until_parked();
+    let default_h = cx.cx.update(|app| view.read(app).line_height());
+    assert_eq!(default_h, crate::geometry::LINE_HEIGHT, "дефолт 13px → 20px");
+
+    cx.dispatch_action(ZoomIn);
+    cx.run_until_parked();
+    let (size, h, saved) = cx.cx.update(|app| {
+        let ws = view.read(app);
+        (
+            ws.font.size,
+            ws.line_height(),
+            ws.session_state(None).font.expect("шрифт в сессии"),
+        )
+    });
+    assert_eq!(size, 14.0);
+    assert_eq!(h, (14.0_f32 * 20.0 / 13.0).round(), "высота строки пересчитана");
+    assert_eq!(saved.size, 14.0);
+
+    // Измеренный advance сброшен и перемеряется под новый размер.
+    let adv = cx.update_window_entity(&view, |ws, window, _cx| ws.char_advance(window));
+    assert!(adv > 0.0);
+
+    // Сброс (Cmd+0).
+    cx.dispatch_action(ZoomReset);
+    cx.run_until_parked();
+    let size = cx.cx.update(|app| view.read(app).font.size);
+    assert_eq!(size, crate::geometry::DEFAULT_FONT_SIZE);
+
+    // Клампы: зум больше максимума не уходит.
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        let mut f = ws.font.clone();
+        f.size = crate::geometry::FONT_MAX;
+        ws.apply_font(f, cx);
+    });
+    cx.dispatch_action(ZoomIn);
+    cx.run_until_parked();
+    let size = cx.cx.update(|app| view.read(app).font.size);
+    assert_eq!(size, crate::geometry::FONT_MAX);
+}
+
+/// 8.3: диалог шрифта — список системных семейств, клик применяет
+/// семейство немедленно; размер — чипом.
+#[gpui::test]
+fn font_dialog_lists_families_and_applies(cx: &mut TestAppContext) {
+    let (view, cx, _p) = editor_with_file(cx, "font-dialog", "hello\n");
+    cx.run_until_parked();
+    // Семейства собираются при открытии.
+    let has_menlo = cx.update_window_entity(&view, |ws, window, cx| {
+        ws.on_open_font_dialog(&OpenFontDialog, window, cx);
+        !ws.all_fonts.is_empty()
+    });
+    assert!(has_menlo, "all_font_names непуст");
+    cx.run_until_parked();
+    // Menlo есть в системе (macOS) и в списке.
+    let families = cx.cx.update(|app| view.read(app).filtered_font_families());
+    assert!(
+        families.iter().any(|f| f == "Menlo"),
+        "Menlo в списке (текущее семейство — первым)"
+    );
+    assert_eq!(families[0], "Menlo", "текущее семейство первым");
+
+    // Размер чипом: 16 — высота строки следует.
+    cx.update_window_entity(&view, |ws, _w, cx| ws.apply_font_size(16.0, cx));
+    cx.run_until_parked();
+    let h = cx.cx.update(|app| view.read(app).line_height());
+    assert_eq!(h, (16.0_f32 * 20.0 / 13.0).round());
+}
+
+
+/// 8.4: выбор языка интерфейса — оверлей со списком доступных, клик
+/// применяет язык (глобаль + меню + зеркало сессии); ключи без
+/// перевода показываются английским (fallback — юнит-тесты i18n).
+#[gpui::test]
+fn ui_language_dialog_switches_language(cx: &mut TestAppContext) {
+    cx.update(|app| crate::i18n::init(app, Some("en")));
+    // Меню собираются из глобали.
+    let has_file = cx.update(|app| {
+        crate::menus::build(app)
+            .iter()
+            .any(|m| m.name.as_ref() == "File")
+    });
+    assert!(has_file, "меню на английском по умолчанию");
+
+    let (view, cx, _p) = editor_with_file(cx, "ui-lang", "hello\n");
+    cx.run_until_parked();
+    cx.dispatch_action(OpenUiLanguageDialog);
+    cx.run_until_parked();
+    // Оверлей открыт; английский присутствует в списке (каталог внешних
+    // языков машины может отличаться — проверяем минимум).
+    assert!(cx.debug_bounds("ui-lang-overlay").is_some(), "оверлей открыт");
+    assert!(
+        cx.debug_bounds("ui-lang-item:en").is_some(),
+        "английский в списке"
+    );
+    // Клик по «en» — язык применён, оверлей закрыт, сессия помнит.
+    let en_bounds = cx.debug_bounds("ui-lang-item:en").unwrap();
+    cx.simulate_click(center_of(en_bounds), Modifiers::default());
+    cx.run_until_parked();
+    let (still_open, saved_lang) = cx.cx.update(|app| {
+        let ws = view.read(app);
+        (ws.ui_lang_dialog, ws.session_state(None).language)
+    });
+    assert!(!still_open, "оверлей закрыт после выбора");
+    assert_eq!(saved_lang.as_deref(), Some("en"));
+}
+
+/// 8.5: раскладка — вкладки по кругу (Cmd+Shift+]), справочник
+/// сочетаний (Cmd+/) с реальными записями KEYMAP.
+#[gpui::test]
+fn hotkeys_tab_cycle_and_shortcuts_reference(cx: &mut TestAppContext) {
+    cx.update(bind_app_keys);
+    let dir = TempDir::new("hotkeys");
+    let a = dir.write("a.txt", "alpha\n");
+    let b = dir.write("b.txt", "beta\n");
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        let mut ws = Workspace::new(cx);
+        ws.model_mut().open_path(&a).unwrap();
+        ws.model_mut().open_path(&b).unwrap();
+        ws
+    });
+    focus_editor(&view, cx);
+    cx.run_until_parked();
+    let active = |cx: &mut gpui::VisualTestContext| -> String {
+        cx.update_window_entity(&view, |ws, _w, _| {
+            let ix = ws.model().active_index().unwrap();
+            ws.model().title(ix).unwrap()
+        })
+    };
+    assert_eq!(active(cx), "b.txt");
+    // Cmd+Shift+[ — на вкладку назад (b → a), по кругу вперёд.
+    cx.simulate_keystrokes("cmd-shift-[");
+    cx.run_until_parked();
+    assert_eq!(active(cx), "a.txt");
+    cx.simulate_keystrokes("cmd-shift-]");
+    cx.run_until_parked();
+    assert_eq!(active(cx), "b.txt");
+
+    // Cmd+/ — справочник: заголовок + записи всех секций KEYMAP.
+    cx.simulate_keystrokes("cmd-/");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("shortcuts-overlay").is_some(),
+        "справочник открыт"
+    );
+    // Подписи из i18n рендерятся (секция File есть в en).
+    let sections = crate::keymap::KEYMAP.iter().map(|d| d.section).collect::<std::collections::BTreeSet<_>>();
+    assert!(sections.contains("file") && sections.contains("view"));
+    // Esc — закрыт.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-overlay").is_none(), "справочник закрыт");
 }

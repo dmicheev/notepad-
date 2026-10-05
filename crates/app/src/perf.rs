@@ -19,7 +19,6 @@ use std::sync::Mutex;
 
 use gpui::{div, prelude::*, px, rgb};
 
-use crate::theme::{CLOSE_HOVER, DIM, PANEL_HEADER, PANEL_HINT, TAB_INACTIVE, TEXT};
 use crate::workspace::Workspace;
 
 /// Сколько последних кадров в окне статистики.
@@ -165,14 +164,14 @@ impl Workspace {
         let mut section = div()
             .mt_2()
             .border_t_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .debug_selector(|| "perf-section".into())
             .child(
                 div()
                     .px_3()
                     .py_2()
                     .text_size(px(11.0))
-                    .text_color(rgb(PANEL_HEADER))
+                    .text_color(rgb(crate::theme::current().panel_header))
                     .child("PERFORMANCE"),
             )
             .child(self.perf_row("frames", format!("{total}")));
@@ -205,7 +204,7 @@ impl Workspace {
                     .pt_2()
                     .pb_1()
                     .text_size(px(11.0))
-                    .text_color(rgb(PANEL_HEADER))
+                    .text_color(rgb(crate::theme::current().panel_header))
                     .child("OPENS"),
             );
             for (name, ms) in opens {
@@ -230,13 +229,13 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .text_ellipsis()
-                                .text_color(rgb(TAB_INACTIVE))
+                                .text_color(rgb(crate::theme::current().tab_inactive))
                                 .child(label),
                         )
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_color(rgb(DIM))
+                                .text_color(rgb(crate::theme::current().dim))
                                 .child(format!("{ms:.0} ms")),
                         ),
                 );
@@ -258,7 +257,7 @@ impl Workspace {
                     .w(px(78.0))
                     .flex_shrink_0()
                     .text_ellipsis()
-                    .text_color(rgb(DIM))
+                    .text_color(rgb(crate::theme::current().dim))
                     .child(key.to_string()),
             )
             .child(
@@ -266,7 +265,7 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .text_ellipsis()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(crate::theme::current().text))
                     .child(value),
             )
     }
@@ -277,7 +276,7 @@ impl Workspace {
             .px_3()
             .py_0p5()
             .text_size(px(9.0))
-            .text_color(rgb(PANEL_HINT))
+            .text_color(rgb(crate::theme::current().panel_hint))
             .child(text.to_string())
     }
 }

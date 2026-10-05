@@ -6,7 +6,6 @@
 use gpui::{div, prelude::*, px, rgb};
 
 use crate::geometry::STATUS_H;
-use crate::theme::{ACCENT, STATUS_DIM, STATUS_FG, STATUS_LANG_HOVER};
 use crate::workspace::Workspace;
 
 impl Workspace {
@@ -14,11 +13,14 @@ impl Workspace {
     /// источник для текста и рендера): префикс «кодировка | переводы
     /// | Ln/Col | …» + метка языка (кликабельная зона). `None` —
     /// вкладок нет.
-    fn status_parts(&self) -> Option<(String, &'static str)> {
-        let tab = self.model.active()?;
+    fn status_parts(&self, cx: &gpui::App) -> Option<(String, &'static str)> {
+        let tab = self.model().active()?;
         let (line, col) = (tab.cursor_line() + 1, tab.cursor_col() + 1);
         let extra = if tab.cursors.len() > 1 {
-            format!(", {} cursors", tab.cursors.len())
+            format!(
+                ", {}",
+                crate::i18n::tf(cx, "status.cursors", &[("n", &tab.cursors.len().to_string())])
+            )
         } else {
             String::new()
         };
@@ -36,11 +38,11 @@ impl Workspace {
     }
 
     /// Текст левой половины статус-бара (для рендера и тестов).
-    pub(crate) fn status_bar_text(&self) -> String {
+    pub(crate) fn status_bar_text(&self, cx: &gpui::App) -> String {
         if let Some(msg) = &self.status_message {
             return msg.clone();
         }
-        match self.status_parts() {
+        match self.status_parts(cx) {
             Some((prefix, language)) => format!("{prefix}{language}"),
             None => "notepad+".to_string(),
         }
@@ -50,9 +52,9 @@ impl Workspace {
         // Язык — кликабельная зона (5.1): открывает оверлей выбора.
         // Пока висит транзиентное сообщение — язык недоступен (весь
         // левый блок заменён сообщением, D8.5).
-        let (prefix, language) = match (self.status_message.is_none(), self.status_parts()) {
+        let (prefix, language) = match (self.status_message.is_none(), self.status_parts(cx)) {
             (true, Some(parts)) => parts,
-            _ => (self.status_bar_text(), ""),
+            _ => (self.status_bar_text(cx), ""),
         };
         div()
             .flex()
@@ -61,8 +63,8 @@ impl Workspace {
             .px_3()
             .h(px(STATUS_H))
             .flex_shrink_0()
-            .bg(rgb(ACCENT))
-            .text_color(rgb(STATUS_FG))
+            .bg(rgb(crate::theme::current().accent))
+            .text_color(rgb(crate::theme::current().status_fg))
             .text_size(px(12.0))
             .child(
                 div()
@@ -80,11 +82,11 @@ impl Workspace {
                                     gpui::MouseButton::Left,
                                     cx.listener(Self::on_status_language_click),
                                 )
-                                .hover(|d| d.bg(rgb(STATUS_LANG_HOVER)))
+                                .hover(|d| d.bg(rgb(crate::theme::current().status_lang_hover)))
                                 .child(language),
                         )
                     }),
             )
-            .child(div().text_color(rgb(STATUS_DIM)).child("notepad+"))
+            .child(div().text_color(rgb(crate::theme::current().status_dim)).child("notepad+"))
     }
 }

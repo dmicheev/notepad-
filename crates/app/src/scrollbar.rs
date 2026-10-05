@@ -19,9 +19,6 @@
 
 use gpui::{AnyElement, Context, MouseButton, ScrollHandle, div, point, prelude::*, px, rgb};
 
-use crate::theme::{
-    SCROLLBAR_THUMB, SCROLLBAR_THUMB_HOVER, SCROLLBAR_TRACK, SCROLLBAR_TRACK_BORDER,
-};
 use crate::workspace::Workspace;
 
 /// Ширина дорожки (px).
@@ -33,43 +30,47 @@ pub(crate) const THUMB_MIN_LEN: f32 = 28.0;
 /// Какую прокрутку тащит пользователь (handle + ось).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScrollTarget {
-    /// Редактор: uniform_list (вертикальная).
-    Editor,
-    /// Редактор: внешняя зона вокруг uniform_list (горизонтальная,
-    /// editor_view.rs).
-    EditorHorizontal,
+    /// Редактор панели: uniform_list (вертикальная). 8.1: полосы
+    /// панелей независимы — индекс в ключе.
+    Editor { pane: usize },
+    /// Редактор панели: внешняя зона вокруг uniform_list
+    /// (горизонтальная, editor_view.rs).
+    EditorHorizontal { pane: usize },
     /// Левая панель (вертикальная).
     Panel,
     /// Оверлей выбора языка (вертикальная).
     Language,
-    /// Таб-бар (горизонтальная).
-    TabBar,
+    /// Таб-бар панели (горизонтальная).
+    TabBar { pane: usize },
 }
 
 impl ScrollTarget {
     /// Ось цели: true — горизонтальная.
     pub(crate) fn horizontal(self) -> bool {
-        matches!(self, ScrollTarget::EditorHorizontal | ScrollTarget::TabBar)
+        matches!(
+            self,
+            ScrollTarget::EditorHorizontal { .. } | ScrollTarget::TabBar { .. }
+        )
     }
 
     /// Уникальный ключ экземпляра вертикальной полосы (id элемента +
     /// debug_selector для GUI-тестов; глобальные ключи — разные
     /// экземпляры полос не путаются в debug_bounds).
-    fn v_key(self) -> &'static str {
+    fn v_key(self) -> String {
         match self {
-            ScrollTarget::Editor => "editor-vscroll",
-            ScrollTarget::Panel => "panel-vscroll",
-            ScrollTarget::Language => "language-vscroll",
-            _ => "vscroll",
+            ScrollTarget::Editor { pane } => format!("editor-vscroll-{pane}"),
+            ScrollTarget::Panel => "panel-vscroll".to_string(),
+            ScrollTarget::Language => "language-vscroll".to_string(),
+            _ => "vscroll".to_string(),
         }
     }
 
     /// Ключ экземпляра горизонтальной полосы.
-    fn h_key(self) -> &'static str {
+    fn h_key(self) -> String {
         match self {
-            ScrollTarget::EditorHorizontal => "editor-hscroll",
-            ScrollTarget::TabBar => "tabbar-hscroll",
-            _ => "hscroll",
+            ScrollTarget::EditorHorizontal { pane } => format!("editor-hscroll-{pane}"),
+            ScrollTarget::TabBar { pane } => format!("tabbar-hscroll-{pane}"),
+            _ => "hscroll".to_string(),
         }
     }
 }
@@ -208,14 +209,16 @@ fn apply_scrolled(handle: &ScrollHandle, horizontal: bool, scrolled: f32) {
 }
 
 impl Workspace {
-    /// ScrollHandle цели (редактор — base_handle uniform_list).
+    /// ScrollHandle цели (редактор — base_handle uniform_list панели).
     pub(crate) fn scroll_handle_for(&self, target: ScrollTarget) -> ScrollHandle {
         match target {
-            ScrollTarget::Editor => self.scroll.0.borrow().base_handle.clone(),
-            ScrollTarget::EditorHorizontal => self.h_scroll.clone(),
+            ScrollTarget::Editor { pane } => {
+                self.panes[pane].scroll.0.borrow().base_handle.clone()
+            }
+            ScrollTarget::EditorHorizontal { pane } => self.panes[pane].h_scroll.clone(),
             ScrollTarget::Panel => self.panel_scroll.clone(),
             ScrollTarget::Language => self.language_scroll.clone(),
-            ScrollTarget::TabBar => self.tab_scroll.clone(),
+            ScrollTarget::TabBar { pane } => self.panes[pane].tab_scroll.clone(),
         }
     }
 
@@ -259,13 +262,16 @@ impl Workspace {
                 .h_full()
                 .flex_shrink_0()
                 .relative()
-                .bg(rgb(SCROLLBAR_TRACK))
+                .bg(rgb(crate::theme::current().scrollbar_track))
                 .border_l_1()
-                .border_color(rgb(SCROLLBAR_TRACK_BORDER))
+                .border_color(rgb(crate::theme::current().scrollbar_track_border))
         } else {
             track.absolute().top_0().right_0().h_full().w(px(TRACK_W))
         }
-        .debug_selector(move || format!("{key}-track"))
+        .debug_selector({
+            let key = key.clone();
+            move || format!("{key}-track")
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
@@ -275,6 +281,11 @@ impl Workspace {
                     return;
                 };
                 apply_scrolled(&handle, false, g.scrolled_for_track_click(f32::from(e.position.y)));
+                // Синхронная прокрутка панелей (8.1): клик по дорожке —
+                // интерактивная прокрутка редактора.
+                if let ScrollTarget::Editor { pane } = target {
+                    this.sync_scroll_from(pane, cx);
+                }
                 cx.notify();
             }),
         );
@@ -282,15 +293,18 @@ impl Workspace {
             track = track.child(
                 div()
                     .id(gpui::SharedString::from(format!("{key}-thumb")))
-                    .debug_selector(move || format!("{key}-thumb"))
+                    .debug_selector({
+                        let key = key.clone();
+                        move || format!("{key}-thumb")
+                    })
                     .absolute()
                     .top(px(g.thumb_pos))
                     .left(px(2.0))
                     .w(px(TRACK_W - 4.0))
                     .h(px(g.thumb_len))
                     .rounded_sm()
-                    .bg(rgb(SCROLLBAR_THUMB))
-                    .hover(|d| d.bg(rgb(SCROLLBAR_THUMB_HOVER)))
+                    .bg(rgb(crate::theme::current().scrollbar_thumb))
+                    .hover(|d| d.bg(rgb(crate::theme::current().scrollbar_thumb_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
@@ -348,13 +362,16 @@ impl Workspace {
                 .w_full()
                 .flex_shrink_0()
                 .relative()
-                .bg(rgb(SCROLLBAR_TRACK))
+                .bg(rgb(crate::theme::current().scrollbar_track))
                 .border_t_1()
-                .border_color(rgb(SCROLLBAR_TRACK_BORDER))
+                .border_color(rgb(crate::theme::current().scrollbar_track_border))
         } else {
             track.absolute().bottom_0().left_0().w_full().h(px(TRACK_W))
         }
-        .debug_selector(move || format!("{key}-track"))
+        .debug_selector({
+            let key = key.clone();
+            move || format!("{key}-track")
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
@@ -371,15 +388,18 @@ impl Workspace {
             track = track.child(
                 div()
                     .id(gpui::SharedString::from(format!("{key}-thumb")))
-                    .debug_selector(move || format!("{key}-thumb"))
+                    .debug_selector({
+                        let key = key.clone();
+                        move || format!("{key}-thumb")
+                    })
                     .absolute()
                     .left(px(g.thumb_pos))
                     .top(px(2.0))
                     .h(px(TRACK_W - 4.0))
                     .w(px(g.thumb_len))
                     .rounded_sm()
-                    .bg(rgb(SCROLLBAR_THUMB))
-                    .hover(|d| d.bg(rgb(SCROLLBAR_THUMB_HOVER)))
+                    .bg(rgb(crate::theme::current().scrollbar_thumb))
+                    .hover(|d| d.bg(rgb(crate::theme::current().scrollbar_thumb_hover)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
@@ -433,6 +453,11 @@ impl Workspace {
         };
         let delta = (mouse - drag.start_mouse) * (g.max_scroll / g.travel());
         apply_scrolled(&handle, horizontal, drag.start_scrolled + delta);
+        // Синхронная прокрутка панелей (8.1): драг ползунка
+        // редакторной вертикали — интерактивная прокрутка.
+        if let ScrollTarget::Editor { pane } = drag.target {
+            self.sync_scroll_from(pane, cx);
+        }
         cx.notify();
         true
     }

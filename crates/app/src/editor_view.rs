@@ -1,7 +1,12 @@
-//! Рендер текста редактора (4.1, D9.1): разрез строк каретками и
-//! выделениями (`split_line`/`line_carets` — чистые функции, есть
-//! unit-тесты), virtualized-список видимых строк с гуттером
-//! (закладки, номера, фолды) и подсветкой активной строки.
+//! Рендер текста редактора (4.1, D9.1 + 8.1/D15.1): разрез строк
+//! каретками и выделениями (`split_line`/`line_carets` — чистые
+//! функции, есть unit-тесты), virtualized-список видимых строк с
+//! гуттером (закладки, номера, фолды) и подсветкой активной строки.
+//!
+//! Split view: `render_editor(pi)` рендерит панель `pi` ЕЁ вкладкой и
+//! scroll-handle'ами; слушатели несут индекс панели (мышь/колесо/
+//! клавиши — editor_mouse/editor_actions). Панель поиска рисуется
+//! только в активной панели (File-scope поиск привязан к её вкладке).
 //!
 //! Ловушка gpui (баг из ручной проверки 4.3): фон выделения вешается
 //! на div СВОЕГО сегмента, а НЕ на контейнер строки — иначе частичное
@@ -22,10 +27,7 @@ use gpui::{
 use editor_core::highlight::Span;
 use editor_core::{Document, Selection};
 
-use crate::geometry::{
-    FONT, FONT_SIZE, GUTTER_W, GUTTER_ZONE_W, LINE_HEIGHT, sticky_header_visible,
-};
-use crate::theme::*;
+use crate::geometry::{GUTTER_W, GUTTER_ZONE_W, sticky_header_visible};
 use crate::workspace::Workspace;
 
 /// Порог записи замера рендера видимых строк (бенчмарк 4.1, паттерн
@@ -202,37 +204,41 @@ pub(crate) fn line_carets(
 impl Workspace {
     pub(crate) fn render_editor(
         &mut self,
+        pi: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        if self.model.is_empty() {
+        let focus = self.panes[pi].focus.clone();
+        if self.panes[pi].model.is_empty() {
             return div()
-                .id("editor-empty")
+                .id(("editor-empty", pi))
                 .flex_1()
                 .min_h_0()
-                .track_focus(&self.focus)
+                .track_focus(&focus)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(DIM))
-                .child("No tabs open — press Cmd+O to open a file, or + for a new tab")
+                .text_color(rgb(crate::theme::current().dim))
+                .child(crate::i18n::t(cx, "editor.empty_hint"))
                 .into_any_element();
         }
 
         // Липкая шапка CSV (D12.5): предикат по scroll-offset (offset.y
-        // отрицателен при прокрутке вниз — семантика D9.2). Спаны
-        // строки 0 прогреваем ЗДЕСЬ, до чтения: ниже вкладка берётся
-        // только на чтение. CSV stateless — ensure_window(0..1) дёшев;
-        // при порог-отключённой подсветке движок без синтаксиса —
+        // отрицателен при прокрутке вниз — семантика D9.2) ПАНЕЛИ.
+        // Спаны строки 0 прогреваем ЗДЕСЬ, до чтения: ниже вкладка
+        // берётся только на чтение. CSV stateless — ensure_window(0..1)
+        // дёшев; при порог-отключённой подсветке движок без синтаксиса —
         // no-op, шапка липнет без цветов (решение D12.5).
-        let is_csv = self.model.active().is_some_and(|t| t.is_csv());
+        let is_csv = self.panes[pi].model.active().is_some_and(|t| t.is_csv());
         let sticky = is_csv
-            && sticky_header_visible(f32::from(self.scroll.0.borrow().base_handle.offset().y));
+            && sticky_header_visible(
+                f32::from(self.panes[pi].scroll.0.borrow().base_handle.offset().y),
+            );
         let header = if sticky {
-            if let Some(tab) = self.model.active_mut() {
+            if let Some(tab) = self.panes[pi].model.active_mut() {
                 tab.highlight.ensure_window(&tab.doc, 0, 1);
             }
-            self.model.active().map(|tab| {
+            self.panes[pi].model.active().map(|tab| {
                 // Arc-клон спанов строки 0 (нет спанов — пусто: без цвета).
                 let colors = tab.highlight.spans(0).cloned().unwrap_or_default();
                 (tab.doc.line_content(0), colors)
@@ -241,28 +247,44 @@ impl Workspace {
             None
         };
 
-        let tab = self.model.active().expect("checked non-empty");
-
-        // uniform_list рендерит ВИДИМЫЕ строки (мапа folding, D9.5);
-        // ensure_fold_view вызван в Render::render.
-        let line_count = self.visible_len();
+        // uniform_list рендерит ВИДИМЫЕ строки панели (мапа folding,
+        // D9.5); ensure_fold_view вызван в Render::render.
+        let line_count = self.visible_len_of(pi);
         // Подсветка активной строки — по ГЛАВНОЙ каретке и только когда
         // она — чистая каретка, без выделения (D9.1).
-        let active_line = tab.primary().is_caret().then(|| tab.cursor_line());
-        // Все курсоры вкладки (4.3).
-        let cursors = tab.cursors.clone();
+        let active_line = self.panes[pi]
+            .model
+            .active()
+            .and_then(|t| t.primary().is_caret().then(|| t.cursor_line()));
+        // Все курсоры вкладки панели (4.3).
+        let cursors = self.panes[pi]
+            .model
+            .active()
+            .map(|t| t.cursors.clone())
+            .unwrap_or_default();
         // Ширина контента горизонтального скролла: гуттер + самая
         // широкая виденная строка (ракетка рендера, tab_model) +
         // хвост; advance моноширинного Menlo — колоночная арифметика
         // точна (табы чуть шире — хвост вбирает). Меньше вьюпорта —
         // не бывает: список ещё и min_w_full. Считается ДО заёма
         // вкладки ниже (char_advance — &mut self).
-        let max_cols = tab.max_seen_cols();
+        let max_cols = self.panes[pi]
+            .model
+            .active()
+            .map(|t| t.max_seen_cols())
+            .unwrap_or(0);
         let advance = self.char_advance(window);
         let content_w = GUTTER_W + max_cols as f32 * advance + H_SCROLL_TAIL;
+        let pane_scroll = self.panes[pi].scroll.clone();
+        let h_scroll = self.panes[pi].h_scroll.clone();
+        let search_here = pi == self.active_pane;
+        // Шрифт редактора (8.3): применяется к строкам немедленно.
+        let font_family = self.font.family.clone();
+        let font_size = self.font.size;
+        let line_h = self.font.line_height();
 
         let mut editor = div()
-            .id("editor")
+            .id(("editor", pi))
             // relative — якорь absolute-оверлея липкой шапки (D12.5)
             // и панели поиска. flex-колонка: [строка: зона скролла |
             // вертикальная дорожка] + горизонтальная дорожка снизу —
@@ -273,14 +295,28 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::handle_key))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_editor_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_editor_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_editor_mouse_up))
+            .track_focus(&focus)
+            .on_key_down(cx.listener(move |this, e, window, cx| {
+                this.handle_key_pane(pi, e, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e, window, cx| {
+                    this.on_editor_mouse_down_pane(pi, e, window, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, e, window, cx| {
+                this.on_editor_mouse_move_pane(pi, e, window, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, e, window, cx| {
+                    this.on_editor_mouse_up_pane(pi, e, window, cx);
+                }),
+            )
             .child(
                 div()
-                    .id("editor-content-row")
+                    .id(("editor-content-row", pi))
                     .flex()
                     .flex_1()
                     .min_h_0()
@@ -289,15 +325,15 @@ impl Workspace {
                     // независимы. min_w_0 — делит строку с дорожкой.
                     .child(
                         div()
-                            .id("editor-hscroll")
+                            .id(("editor-hscroll", pi))
                             .flex_1()
                             .min_w_0()
                             .relative()
                             .overflow_x_scroll()
-                            .track_scroll(&self.h_scroll)
+                            .track_scroll(&h_scroll)
                             .child(
                 uniform_list(
-                    "lines",
+                    ("lines", pi),
                     line_count,
                     cx.processor(
                         move |this: &mut Self,
@@ -311,18 +347,26 @@ impl Workspace {
                             // real-строки окна считаем ДО мутабельного
                             // заёма вкладки (движок подсветки — &mut).
                             let reals: Vec<usize> =
-                                range.clone().map(|ix| this.visible_to_real(ix)).collect();
-                            // Совпадения поиска (6.1) для окна — тоже ДО
-                            // заёма вкладки (метод читает модель).
-                            let line_hits: Vec<Vec<((usize, usize), bool)>> = reals
-                                .iter()
-                                .copied()
-                                .map(|real| {
-                                    let (ranges, curs) = this.search_line_hits(real);
-                                    ranges.into_iter().zip(curs).collect()
-                                })
-                                .collect();
-                            let Some(tab) = this.model.active_mut() else {
+                                range.clone().map(|ix| this.visible_to_real_of(pi, ix)).collect();
+                            // Совпадения поиска (6.1) для окна — только
+                            // в активной панели (File-scope поиск
+                            // привязан к её вкладке); тоже ДО заёма.
+                            let line_hits: Vec<Vec<((usize, usize), bool)>> = if search_here {
+                                reals
+                                    .iter()
+                                    .copied()
+                                    .map(|real| {
+                                        let (ranges, curs) = this.search_line_hits(real);
+                                        ranges.into_iter().zip(curs).collect()
+                                    })
+                                    .collect()
+                            } else {
+                                vec![Vec::new(); reals.len()]
+                            };
+                            let Some(pane) = this.panes.get_mut(pi) else {
+                                return Vec::new();
+                            };
+                            let Some(tab) = pane.model.active_mut() else {
                                 return Vec::new();
                             };
                             // Догон подсветки не завершён (бюджет
@@ -390,8 +434,8 @@ impl Workspace {
                                 let mut text_cell = div()
                                     .flex()
                                     .items_center()
-                                    .text_size(px(FONT_SIZE))
-                                    .font_family(FONT)
+                                    .text_size(px(font_size))
+                                    .font_family(font_family.clone())
                                     .whitespace_nowrap();
                                 for (si, seg) in split_line_full(
                                     &content,
@@ -407,8 +451,8 @@ impl Workspace {
                                         d.child(
                                             div()
                                                 .w(px(2.0))
-                                                .h(px(LINE_HEIGHT - 4.0))
-                                                .bg(rgb(CARET))
+                                                .h(px(line_h - 4.0))
+                                                .bg(rgb(crate::theme::current().caret))
                                                 .flex_shrink_0(),
                                         )
                                     });
@@ -419,21 +463,21 @@ impl Workspace {
                                         // выделении (баг из ручной проверки 4.3).
                                         let mut seg_div = div().child(seg.text);
                                         if seg.selected {
-                                            seg_div = seg_div.bg(rgb(SELECTION));
+                                            seg_div = seg_div.bg(rgb(crate::theme::current().selection));
                                         } else if seg.search_current {
                                             // Приоритет фона: выделение &gt;
                                             // текущее совпадение &gt; совпадение
                                             // (D13); активная строка — фон row,
                                             // сегменты поверх неё.
-                                            seg_div = seg_div.bg(rgb(SEARCH_CURRENT));
+                                            seg_div = seg_div.bg(rgb(crate::theme::current().search_current));
                                         } else if seg.search_hit {
-                                            seg_div = seg_div.bg(rgb(SEARCH_MATCH));
+                                            seg_div = seg_div.bg(rgb(crate::theme::current().search_match));
                                         }
                                         // Цвет подсветки — тоже на сегменте;
                                         // класс 0/None не задаёт цвет —
                                         // наследуется TEXT (round-trip D12.1).
                                         if let Some(class) = seg.class {
-                                            seg_div = seg_div.text_color(rgb(syntax_color(class)));
+                                            seg_div = seg_div.text_color(rgb(crate::theme::current().syntax_color(class)));
                                         }
                                         // Границы сегмента для GUI-тестов рендера
                                         // (no-op без test-support).
@@ -443,15 +487,15 @@ impl Workspace {
                                     }
                                 }
                                 let mut row = div()
-                                    .h(px(LINE_HEIGHT))
+                                    .h(px(line_h))
                                     .flex()
                                     .w_full()
-                                    .when(is_active_line, |d| d.bg(rgb(CARET_LINE)))
+                                    .when(is_active_line, |d| d.bg(rgb(crate::theme::current().caret_line)))
                                     .when(header_inplace, |d| {
                                         // relative — якорь 1px-разделителя;
                                         // маркер для GUI-тестов «на месте».
                                         d.relative()
-                                            .bg(rgb(CSV_HEADER_BG))
+                                            .bg(rgb(crate::theme::current().csv_header_bg))
                                             .debug_selector(|| "csv-header-inplace".to_string())
                                     })
                                         // Гуттер: [fold-зона | номер | закладка].
@@ -464,11 +508,12 @@ impl Workspace {
                                                 // Зона закладки (клик — toggle).
                                                 .child(
                                                     div()
-                                                        .id(("bm", real))
+                                                        .id(("bm", pi * 1_000_000_000 + real))
                                                         .on_mouse_down(
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _e, _w, cx| {
                                                                 cx.stop_propagation();
+                                                                this.activate_pane(pi, cx);
                                                                 this.toggle_bookmark_at(real, cx);
                                                             }),
                                                         )
@@ -479,7 +524,7 @@ impl Workspace {
                                                         .items_center()
                                                         .justify_center()
                                                         .text_size(px(9.0))
-                                                        .text_color(rgb(ACCENT))
+                                                        .text_color(rgb(crate::theme::current().accent))
                                                         .child(if bookmarked { "●" } else { "" }),
                                                 )
                                                 // Номер строки (подсветка активной).
@@ -487,14 +532,14 @@ impl Workspace {
                                                     div()
                                                         .flex_1()
                                                         .text_size(px(11.0))
-                                                        .text_color(rgb(GUTTER))
+                                                        .text_color(rgb(crate::theme::current().gutter))
                                                         .text_right()
                                                         .child(format!("{}", real + 1)),
                                                 )
                                                 // Зона свёртывания: клик — toggle фолда.
                                                 .child({
                                                     let zone = div()
-                                                        .id(("fold", real))
+                                                        .id(("fold", pi * 1_000_000_000 + real))
                                                         .w(px(GUTTER_ZONE_W))
                                                         .h_full()
                                                         .flex_shrink_0()
@@ -502,23 +547,24 @@ impl Workspace {
                                                         .items_center()
                                                         .justify_center()
                                                         .text_size(px(9.0))
-                                                        .text_color(rgb(GUTTER))
+                                                        .text_color(rgb(crate::theme::current().gutter))
                                                         .child(fold_marker);
                                                     if foldable {
                                                         zone.on_mouse_down(
                                                             MouseButton::Left,
                                                             cx.listener(move |this, _e, _w, cx| {
                                                                 cx.stop_propagation();
+                                                                this.activate_pane(pi, cx);
                                                                 this.toggle_fold_at(real, cx);
                                                             }),
                                                         )
-                                                        .hover(|d| d.text_color(rgb(TEXT)))
+                                                        .hover(|d| d.text_color(rgb(crate::theme::current().text)))
                                                     } else {
                                                         zone
                                                     }
                                                  }),
-                                         )
-                                         .child(text_cell);
+                                          )
+                                          .child(text_cell);
                                 // Шапка на месте: абсолютный 1px-разделитель
                                 // снизу (absolute не влияет на layout — высота
                                 // строки остаётся ровно LINE_HEIGHT).
@@ -530,7 +576,7 @@ impl Workspace {
                                             .left_0()
                                             .w_full()
                                             .h(px(1.0))
-                                            .bg(rgb(CSV_HEADER_BORDER)),
+                                            .bg(rgb(crate::theme::current().csv_header_border)),
                                     );
                                 }
                                 items.push(row);
@@ -565,7 +611,7 @@ impl Workspace {
                         },
                     ),
                 )
-                .track_scroll(self.scroll.clone())
+                .track_scroll(pane_scroll)
                 // Фиксированная ширина контента (горизонтальный
                 // скролл зоны): строки w_full заполняют её целиком —
                 // фоны активной строки/шапки тянутся на всю ширину
@@ -591,24 +637,28 @@ impl Workspace {
                     // проходят сквозь.
                     .child(
                         div()
-                            .id("editor-wheel-guard")
+                            .id(("editor-wheel-guard", pi))
                             .absolute()
                             .top_0()
                             .left_0()
                             .size_full()
-                            .on_scroll_wheel(cx.listener(Self::on_editor_wheel)),
+                            .on_scroll_wheel(cx.listener(move |this, e, window, cx| {
+                                this.on_editor_wheel_pane(pi, e, window, cx);
+                            })),
                     ),
             )
             // Вертикальная дорожка — сосед зоны (своя полоса, не
             // поверх текста); wheel над ней тоже через on_editor_wheel.
             .child(
                 div()
-                    .id("editor-vlane")
+                    .id(("editor-vlane", pi))
                     .h_full()
-                    .on_scroll_wheel(cx.listener(Self::on_editor_wheel))
+                    .on_scroll_wheel(cx.listener(move |this, e, window, cx| {
+                        this.on_editor_wheel_pane(pi, e, window, cx);
+                    }))
                     .child(
                         self.render_vertical_scrollbar_lane(
-                            crate::scrollbar::ScrollTarget::Editor,
+                            crate::scrollbar::ScrollTarget::Editor { pane: pi },
                             cx,
                         ),
                     ),
@@ -618,11 +668,13 @@ impl Workspace {
             // хвост — угловой квадратик (ход ползунка = ширина зоны).
             .child(
                 div()
-                    .id("editor-hlane")
-                    .on_scroll_wheel(cx.listener(Self::on_editor_wheel))
+                    .id(("editor-hlane", pi))
+                    .on_scroll_wheel(cx.listener(move |this, e, window, cx| {
+                        this.on_editor_wheel_pane(pi, e, window, cx);
+                    }))
                     .child(
                         self.render_horizontal_scrollbar_lane(
-                            crate::scrollbar::ScrollTarget::EditorHorizontal,
+                            crate::scrollbar::ScrollTarget::EditorHorizontal { pane: pi },
                             cx,
                         ),
                     ),
@@ -631,19 +683,26 @@ impl Workspace {
         // вертикальная после uniform_list, горизонтальная снизу;
         // липкая шапка/панель поиска выше по z-order (паттерн
         // детей-оверлеев).
-        editor = editor.child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Editor, cx));
-        editor = editor.child(self.render_horizontal_scrollbar(crate::scrollbar::ScrollTarget::EditorHorizontal, cx));
+        editor = editor.child(
+            self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Editor { pane: pi }, cx),
+        );
+        editor = editor.child(self.render_horizontal_scrollbar(
+            crate::scrollbar::ScrollTarget::EditorHorizontal { pane: pi },
+            cx,
+        ));
         // Липкая шапка (D12.5) — ребёнок контейнера редактора, добавлен
         // ПОСЛЕ uniform_list: рендерится поверх, перекрывает первую
         // видимую строку (нормально для липкой шапки); клики ловит её
         // собственный on_mouse_down + stop_propagation.
         if let Some((content, colors)) = header {
-            editor = editor.child(self.render_csv_sticky_header(cx, &content, &colors));
+            editor = editor.child(self.render_csv_sticky_header(pi, cx, &content, &colors));
         }
         // Панель поиска (6.1, D13): абсолютный оверлей top-right,
-        // постоянная пока открыта; фокус панели — клавиши редактора
-        // не получают (ловушка D9.2), клики стопаются на корне панели.
-        if self.search.is_some() {
+        // постоянная пока открыта; только в АКТИВНОЙ панели (File-scope
+        // поиск привязан к её вкладке); фокус панели — клавиши
+        // редактора не получают (ловушка D9.2), клики стопаются на
+        // корне панели.
+        if search_here && self.search.is_some() {
             editor = editor.child(self.render_search_panel(cx));
         }
         editor.into_any_element()
@@ -658,6 +717,7 @@ impl Workspace {
     /// (`scroll_to_item(0, Top)` + notify; предикат скрывает шапку).
     fn render_csv_sticky_header(
         &self,
+        pi: usize,
         cx: &Context<Self>,
         content: &str,
         colors: &[Span],
@@ -668,13 +728,13 @@ impl Workspace {
         // текст шапки ЕДЕТ вместе со строками (гуттер стоит) —
         // отрицательный margin на величину прокрутки (render читает
         // offset прошлого prepaint — ловушка D12.5, шапка догоняет).
-        let scroll_x = -f32::from(self.h_scroll.offset().x).max(0.0);
+        let scroll_x = -f32::from(self.panes[pi].h_scroll.offset().x).max(0.0);
         let mut text_cell = div()
             .flex()
             .items_center()
             .ml(px(-scroll_x))
-            .text_size(px(FONT_SIZE))
-            .font_family(FONT)
+            .text_size(px(self.font.size))
+            .font_family(self.font.family.clone())
             .whitespace_nowrap();
         for (si, seg) in split_line_styled(content, &[], &[], colors).into_iter().enumerate() {
             if seg.text.is_empty() {
@@ -682,31 +742,33 @@ impl Workspace {
             }
             let mut seg_div = div().child(seg.text);
             if let Some(class) = seg.class {
-                seg_div = seg_div.text_color(rgb(syntax_color(class)));
+                seg_div = seg_div.text_color(rgb(crate::theme::current().syntax_color(class)));
             }
             let key = format!("csv-sticky-seg:{si}");
             seg_div = seg_div.debug_selector(move || key.clone());
             text_cell = text_cell.child(seg_div);
         }
         div()
-            .id("csv-sticky-header")
+            .id(("csv-sticky-header", pi))
             .absolute()
             .top_0()
             .left_0()
             // Ширина — до вертикальной дорожки (left+right, без
             // w_full): шапка не наезжает на полосу прокрутки.
             .right(px(crate::scrollbar::TRACK_W))
-            .h(px(LINE_HEIGHT))
+            .h(px(self.font.line_height()))
             .flex()
             .items_center()
-            .bg(rgb(CSV_HEADER_BG))
+            .bg(rgb(crate::theme::current().csv_header_bg))
             .border_b_1()
-            .border_color(rgb(CSV_HEADER_BORDER))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
+            .border_color(rgb(crate::theme::current().csv_header_border))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _e, _w, cx| {
                 cx.stop_propagation();
                 // Клик по шапке — к началу файла: строка 0 возвращается
                 // на своё место, оверлей исчезает по предикату.
-                this.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                this.panes[pi]
+                    .scroll
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 // Ловушка отложенного скролла (спайк D12.5):
                 // scroll_to_item применяется в prepaint ПОСЛЕ render —
                 // оверлей на этом кадре строится по СТАРОМУ offset и
@@ -714,7 +776,8 @@ impl Workspace {
                 // началу == offset (0, 0) — ставим немедленно (тот же
                 // общий Rc<RefCell>, что читает render; deferred-скролл
                 // подтвердит значение в prepaint).
-                this.scroll
+                this.panes[pi]
+                    .scroll
                     .0
                     .borrow()
                     .base_handle
@@ -731,7 +794,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .text_size(px(11.0))
-                    .text_color(rgb(GUTTER))
+                    .text_color(rgb(crate::theme::current().gutter))
                     .child(div().w(px(GUTTER_ZONE_W)).flex_shrink_0())
                     .child(div().flex_1().text_right().child("1"))
                     .child(div().w(px(GUTTER_ZONE_W)).flex_shrink_0()),

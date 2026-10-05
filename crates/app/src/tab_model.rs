@@ -27,6 +27,11 @@ impl TabModel {
         &self.tabs
     }
 
+    /// Мутабельный обход вкладок (прогрев языков всех панелей, 8.1).
+    pub fn tabs_mut(&mut self) -> impl Iterator<Item = &mut BufferTab> {
+        self.tabs.iter_mut()
+    }
+
     pub fn len(&self) -> usize {
         self.tabs.len()
     }

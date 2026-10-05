@@ -11,7 +11,6 @@
 
 use gpui::{Context, KeyDownEvent, MouseButton, Window, div, prelude::*, px, rgb};
 
-use crate::theme::{CLOSE_HOVER, DIM, PANEL, TABBAR, TEXT};
 use crate::workspace::Workspace;
 
 impl Workspace {
@@ -24,18 +23,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.model.active_index() {
-            let needs_ask = self
+        let pi = self.active_pane;
+        if let Some(index) = self.panes[pi].model.active_index() {
+            let needs_ask = self.panes[pi]
                 .model
                 .tab_mut(index)
                 .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed);
             if needs_ask {
-                self.pending_threshold_tabs.push(index);
+                self.pending_threshold_tabs.push((pi, index));
                 self.ask_pending_threshold(window, cx);
                 return;
             }
         }
-        if self.model.active().is_some() {
+        if self.model().active().is_some() {
             self.language_input = Some(String::new());
             window.focus(&self.language_focus);
             cx.notify();
@@ -50,18 +50,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.language_input = None;
-        window.focus(&self.focus);
-        if let Some(tab) = self.model.active_mut() {
-            match choice {
-                "Auto-detect" => tab.set_language_auto(),
-                "Plain Text" => tab.set_language(None),
-                name => {
-                    if let Some(syntax) = crate::language::syntax_for_choice(name) {
-                        tab.set_language(Some(syntax));
-                    } else {
-                        return; // неизвестное имя — просто закрыть
-                    }
-                }
+        window.focus(&self.active_focus());
+        if let Some(tab) = self.model_mut().active_mut() {
+            if choice == crate::i18n::t(cx, "lang.auto_detect") {
+                tab.set_language_auto();
+            } else if choice == "Plain Text" {
+                tab.set_language(None);
+            } else if let Some(syntax) = crate::language::syntax_for_choice(choice) {
+                tab.set_language(Some(syntax));
+            } else {
+                return; // неизвестное имя — просто закрыть
             }
         }
         cx.notify();
@@ -82,14 +80,14 @@ impl Workspace {
             .map(|input| crate::overlay_input::feed(input, event, 32, |c| !c.is_control()));
         match outcome {
             Some(crate::overlay_input::InputKey::Submit) => {
-                let choice = self.filtered_languages().into_iter().next().map(str::to_string);
+                let choice = self.filtered_languages(cx).into_iter().next();
                 if let Some(choice) = choice {
                     self.apply_language_choice(&choice, window, cx);
                 }
             }
             Some(crate::overlay_input::InputKey::Cancel) => {
                 self.language_input = None;
-                window.focus(&self.focus);
+                window.focus(&self.active_focus());
             }
             _ => {}
         }
@@ -99,7 +97,7 @@ impl Workspace {
     /// Отфильтрованный список для overlay: спец-записи всегда видны
     /// (Enter по ним валиден — авто/текст), далее языки, содержащие
     /// ввод (регистронезависимо).
-    pub(crate) fn filtered_languages(&self) -> Vec<&'static str> {
+    pub(crate) fn filtered_languages(&self, cx: &gpui::App) -> Vec<String> {
         let query = self
             .language_input
             .as_deref()
@@ -108,11 +106,15 @@ impl Workspace {
         let matches = |name: &str| {
             query.is_empty() || name.to_ascii_lowercase().contains(&query)
         };
-        let mut out = vec!["Auto-detect", "Plain Text"];
+        let mut out: Vec<String> = vec![
+            crate::i18n::t(cx, "lang.auto_detect"),
+            "Plain Text".to_string(),
+        ];
         out.extend(
             crate::language::language_list()
                 .into_iter()
-                .filter(|n| matches(n)),
+                .filter(|n| matches(n))
+                .map(str::to_string),
         );
         out
     }
@@ -124,25 +126,27 @@ impl Workspace {
     /// обёртки (scrollbar.rs); move/up обёртки ведут драг ползунка.
     pub(crate) fn render_language_overlay(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let input = self.language_input.clone().unwrap_or_default();
-        let items = self.filtered_languages();
+        let items = self.filtered_languages(cx);
         let mut list = div().flex().flex_col();
         for (li, name) in items.iter().enumerate() {
-            let name = *name;
+            let name = name.clone();
+            let name_for_sel = name.clone();
+            let name_for_click = name.clone();
             list = list.child(
                 div()
                     .id(("lang-item", li))
-                    .debug_selector(move || format!("lang-item:{name}"))
+                    .debug_selector(move || format!("lang-item:{name_for_sel}"))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
                             cx.stop_propagation();
-                            this.apply_language_choice(name, window, cx);
+                            this.apply_language_choice(&name_for_click, window, cx);
                         }),
                     )
                     .px_2()
                     .py_1()
                     .text_size(px(12.0))
-                    .hover(|d| d.bg(rgb(CLOSE_HOVER)))
+                    .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
                     .child(name),
             );
         }
@@ -157,9 +161,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .pb_2()
-            .bg(rgb(PANEL))
+            .bg(rgb(crate::theme::current().panel))
             .border_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .rounded_md()
             .shadow_md()
             .track_focus(&self.language_focus)
@@ -183,14 +187,14 @@ impl Workspace {
                     .px_3()
                     .py_2()
                     .text_size(px(12.0))
-                    .bg(rgb(TABBAR))
-                    .child(div().text_color(rgb(DIM)).child("Language:"))
+                    .bg(rgb(crate::theme::current().tabbar))
+                    .child(div().text_color(rgb(crate::theme::current().dim)).child(crate::i18n::t(cx, "lang.label")))
                     .child(
                         div()
                             .flex_1()
-                            .text_color(rgb(if input.is_empty() { DIM } else { TEXT }))
+                            .text_color(rgb(if input.is_empty() { crate::theme::current().dim } else { crate::theme::current().text }))
                             .child(if input.is_empty() {
-                                "type to filter…".to_string()
+                                crate::i18n::t(cx, "lang.filter_placeholder")
                             } else {
                                 input
                             }),

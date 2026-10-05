@@ -48,8 +48,9 @@ pub(crate) enum SearchField {
 /// Владелец результата поиска.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SearchOwner {
-    /// Открытая вкладка (tabs scope); untitled — индекс + подпись.
-    Tab { index: usize, label: String },
+    /// Открытая вкладка (tabs scope): панель + индекс в ней + подпись
+    /// (8.1: вкладки у панелей независимые).
+    Tab { pane: usize, index: usize, label: String },
     /// Файл папки (folder scope); клик — open_path с дедупликацией.
     Path { path: PathBuf, label: String },
 }
@@ -123,10 +124,11 @@ impl SearchPanel {
         }
     }
 
-    /// Счётчик панели: «текущее/N» или «No results».
-    pub fn counter(&self) -> String {
+    /// Счётчик панели: «текущее/N» или «No results» (строка — от
+    /// вызывающего кода: переводы живут в глобали App).
+    pub fn counter(&self, no_results: &str) -> String {
         if self.matches.is_empty() {
-            "No results".to_string()
+            no_results.to_string()
         } else {
             format!("{}/{}", (self.current + 1).min(self.matches.len()), self.matches.len())
         }
@@ -154,11 +156,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.model.active().is_none() {
+        if self.model().active().is_none() {
             return;
         }
         let mut panel = SearchPanel::new(SearchScope::File);
-        if let Some(tab) = self.model.active() {
+        if let Some(tab) = self.model().active() {
             let sel = tab.primary();
             if !sel.is_caret()
                 && tab.doc.char_to_line(sel.start) == tab.doc.char_to_line(sel.end)
@@ -176,7 +178,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.model.active().is_none() {
+        if self.model().active().is_none() {
             return;
         }
         self.open_search(SearchPanel::new(SearchScope::Tabs), window, cx);
@@ -194,7 +196,7 @@ impl Workspace {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose folder to search".into()),
+            prompt: Some(crate::i18n::t(cx, "dialog.choose_folder").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await
@@ -218,7 +220,7 @@ impl Workspace {
         self.search = Some(panel);
         window.focus(&self.search_focus);
         if is_file {
-            self.search_recompute_file();
+            self.search_recompute_file(cx);
         }
         cx.notify();
     }
@@ -237,7 +239,7 @@ impl Workspace {
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search = None;
-        window.focus(&self.focus);
+        window.focus(&self.active_focus());
         cx.notify();
     }
 
@@ -281,7 +283,7 @@ impl Workspace {
                 let field = active_field_mut(sp);
                 field.pop();
                 if scope_file {
-                    self.search_recompute_file();
+                    self.search_recompute_file(cx);
                 }
             }
             "tab" => {
@@ -308,7 +310,7 @@ impl Workspace {
                         field.push_str(ch);
                     }
                     if scope_file {
-                        self.search_recompute_file();
+                        self.search_recompute_file(cx);
                     }
                 }
             }
@@ -337,7 +339,7 @@ impl Workspace {
     /// Полный пересчёт совпадений активной вкладки (File scope):
     /// смена запроса/опций/вкладки, undo/redo. Ошибка regex — в панель
     /// и статус-бар.
-    pub(crate) fn search_recompute_file(&mut self) {
+    pub(crate) fn search_recompute_file(&mut self, cx: &gpui::App) {
         let Some(sp) = self.search.as_mut() else { return };
         if sp.scope != SearchScope::File {
             return;
@@ -345,7 +347,9 @@ impl Workspace {
         sp.error = None;
         sp.matches.clear();
         sp.current = 0;
-        let Some(tab) = self.model.active() else { return };
+        // Прямой путь к полю: поиск заимствует self.search, модель —
+        // отдельное поле (метод-аксессор занял бы весь self).
+        let Some(tab) = self.panes[self.active_pane].model.active() else { return };
         match Self::search_matcher(sp) {
             None => {}
             Some(Ok(m)) => {
@@ -358,7 +362,7 @@ impl Workspace {
         sp.version = tab.view_version();
         search_update_current(sp, tab);
         if let Some(err) = sp.error.clone() {
-            self.status_message = Some(format!("Invalid search pattern: {err}"));
+            self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &err)]));
         }
     }
 
@@ -371,7 +375,7 @@ impl Workspace {
         if sp.scope != SearchScope::File {
             return;
         }
-        let Some(tab) = self.model.active_mut() else {
+        let Some(tab) = self.panes[self.active_pane].model.active_mut() else {
             sp.matches.clear();
             return;
         };
@@ -440,7 +444,7 @@ impl Workspace {
         if sp.matches.is_empty() {
             return;
         }
-        let Some(tab) = self.model.active() else { return };
+        let Some(tab) = self.panes[self.active_pane].model.active() else { return };
         let primary = *tab.primary();
         // Точка отсчёта навигации: каретка — от головы; выделенное
         // совпадение (после прыжка) — от его конца/начала: Enter от
@@ -465,7 +469,7 @@ impl Workspace {
         sp.current = idx;
         let (s, e) = sp.matches[idx];
         let line = tab.doc.char_to_line(s);
-        if let Some(tab) = self.model.active_mut() {
+        if let Some(tab) = self.panes[self.active_pane].model.active_mut() {
             tab.set_cursors(vec![Selection::range(s, e)]);
         }
         // Немедленный скролл (замечание юзабилити): строка совпадения
@@ -489,7 +493,7 @@ impl Workspace {
         let Some(Ok(matcher)) = Self::search_matcher(sp) else { return };
         let replacement = sp.replacement.clone();
         let current = sp.current;
-        let Some(tab) = self.model.active_mut() else { return };
+        let Some(tab) = self.panes[self.active_pane].model.active_mut() else { return };
         let Ok(mut edits) = matcher.replacements_in_doc(&tab.doc, &replacement) else {
             return;
         };
@@ -511,9 +515,9 @@ impl Workspace {
         }
         if n > 0 {
             self.status_message =
-                Some(format!("Replaced {} occurrence(s)", n));
+                Some(crate::i18n::tf(cx, "search.replaced", &[("n", &n.to_string())]));
         }
-        self.search_recompute_file();
+        self.search_recompute_file(cx);
         cx.notify();
     }
 
@@ -526,25 +530,35 @@ impl Workspace {
         let Some(sp) = self.search.as_ref() else { return };
         let Some(hit) = sp.results.get(hit_ix).cloned() else { return };
         let ix = match &hit.owner {
-            SearchOwner::Tab { index, .. } => {
-                if *index >= self.model.len() {
+            SearchOwner::Tab { pane, index, .. } => {
+                // Панель/вкладка могли закрыться с момента поиска.
+                let Some(model) = self.panes.get(*pane).map(|p| &p.model) else {
+                    return;
+                };
+                if *index >= model.len() {
                     return; // вкладка закрыта с момента поиска
                 }
-                self.model.activate(*index);
+                self.activate_pane(*pane, cx);
+                if let Some(pane_model) = self.panes.get_mut(*pane) {
+                    pane_model.model.activate(*index);
+                }
                 *index
             }
-            SearchOwner::Path { path, .. } => match self.model.open_path(path) {
+            SearchOwner::Path { path, .. } => match self.model_mut().open_path(path) {
                 Ok(ix) => ix,
                 Err(e) => {
-                    self.status_message =
-                        Some(format!("Could not open {}: {e}", path.display()));
+                    self.status_message = Some(crate::i18n::tf(
+                        cx,
+                        "status.open_failed",
+                        &[("file", &path.display().to_string()), ("err", &e.to_string())],
+                    ));
                     cx.notify();
                     return;
                 }
             },
         };
         let line = hit.line;
-        if let Some(tab) = self.model.tab_mut(ix) {
+        if let Some(tab) = self.model_mut().tab_mut(ix) {
             let last = tab.doc.len_lines().saturating_sub(1);
             let line = line.min(last);
             let ls = tab.doc.line_to_char(line);
@@ -579,7 +593,7 @@ impl Workspace {
             sp.scope == SearchScope::File
         };
         if recompute {
-            self.search_recompute_file();
+            self.search_recompute_file(cx);
         }
         cx.notify();
     }
@@ -609,7 +623,7 @@ impl Workspace {
                 if let Some(sp) = self.search.as_mut() {
                     sp.scope = SearchScope::File;
                 }
-                self.search_recompute_file();
+                self.search_recompute_file(cx);
                 cx.notify();
             }
             "tabs" => {
@@ -623,7 +637,7 @@ impl Workspace {
             "folder" => {
                 // Дефолт — папка активной вкладки; иначе диалог.
                 let default = self
-                    .model
+                    .model()
                     .active()
                     .and_then(|t| t.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())));
                 if let Some(folder) = default {
@@ -693,7 +707,10 @@ impl Workspace {
         if sp.scope != SearchScope::File {
             return (Vec::new(), Vec::new());
         }
-        let Some(tab) = self.model.active() else { return (Vec::new(), Vec::new()) };
+        let Some(tab) = self.panes[self.active_pane]
+            .model
+            .active()
+        else { return (Vec::new(), Vec::new()) };
         let last = tab.doc.len_lines().saturating_sub(1);
         let real_line = real_line.min(last);
         let ls = tab.doc.line_to_char(real_line);

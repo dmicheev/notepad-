@@ -21,7 +21,6 @@ use gpui::{
 
 use crate::actions::{DeleteNode, NewFile, NewFolder, OpenWorkspace, RenameNode};
 use crate::fs_tree::FsTree;
-use crate::theme::{ACCENT, CLOSE_HOVER, DIM, PANEL, PANEL_HEADER, SELECTION, TABBAR, TEXT};
 use crate::workspace::Workspace;
 
 /// Какой диалог ввода имени открыт.
@@ -64,11 +63,11 @@ impl Render for DragGhost {
             .px_2()
             .py_1()
             .text_size(px(11.0))
-            .bg(rgb(TABBAR))
+            .bg(rgb(crate::theme::current().tabbar))
             .border_1()
-            .border_color(rgb(ACCENT))
+            .border_color(rgb(crate::theme::current().accent))
             .rounded_md()
-            .text_color(rgb(TEXT))
+            .text_color(rgb(crate::theme::current().text))
             .child(format!("{} {}", if self.is_dir { "▸" } else { "▪" }, self.name))
     }
 }
@@ -118,15 +117,21 @@ impl Workspace {
                     }
                     Err(e) => {
                         self.fs_watch = None;
-                        self.status_message =
-                            Some(format!("File watching unavailable: {e}"));
+                        self.status_message = Some(crate::i18n::tf(
+                            cx,
+                            "status.watch_unavailable",
+                            &[("err", &e.to_string())],
+                        ));
                     }
                 }
                 cx.notify();
             }
             Err(e) => {
-                self.status_message =
-                    Some(format!("Could not open workspace {}: {e}", root.display()));
+                self.status_message = Some(crate::i18n::tf(
+                    cx,
+                    "status.workspace_open_failed",
+                    &[("path", &root.display().to_string()), ("err", &e.to_string())],
+                ));
                 cx.notify();
             }
         }
@@ -188,7 +193,7 @@ impl Workspace {
     /// Уведомление, когда воркспейс не открыт (действия дерева).
     fn require_tree(&mut self, cx: &mut Context<Self>) -> bool {
         if self.tree.is_none() {
-            self.status_message = Some("No workspace open (Cmd+Shift+O to open)".to_string());
+            self.status_message = Some(crate::i18n::t(cx, "status.no_workspace"));
             cx.notify();
             false
         } else {
@@ -234,12 +239,12 @@ impl Workspace {
             return;
         };
         let Some(node) = tree.selected().map(|p| p.to_path_buf()) else {
-            self.status_message = Some("Select an item in the tree to rename".to_string());
+            self.status_message = Some(crate::i18n::t(cx, "status.select_to_rename"));
             cx.notify();
             return;
         };
         if node == tree.root() {
-            self.status_message = Some("Cannot rename workspace root".to_string());
+            self.status_message = Some(crate::i18n::t(cx, "status.cannot_rename_root"));
             cx.notify();
             return;
         }
@@ -263,12 +268,12 @@ impl Workspace {
             return;
         };
         let Some(node) = tree.selected().map(|p| p.to_path_buf()) else {
-            self.status_message = Some("Select an item in the tree to delete".to_string());
+            self.status_message = Some(crate::i18n::t(cx, "status.select_to_delete"));
             cx.notify();
             return;
         };
         if node == tree.root() {
-            self.status_message = Some("Cannot delete workspace root".to_string());
+            self.status_message = Some(crate::i18n::t(cx, "status.cannot_delete_root"));
             cx.notify();
             return;
         }
@@ -284,13 +289,19 @@ impl Workspace {
             .unwrap_or_else(|| node.display().to_string());
         let rx = window.prompt(
             PromptLevel::Warning,
-            &format!("Delete \"{name}\"?"),
-            Some(if is_dir {
-                "The folder and all its contents will be deleted permanently."
-            } else {
-                "The file will be deleted permanently."
-            }),
-            &["Delete", "Cancel"],
+            &crate::i18n::tf(cx, "dialog.delete_title", &[("name", &name)]),
+            Some(
+                if is_dir {
+                    crate::i18n::t(cx, "dialog.delete_folder_note")
+                } else {
+                    crate::i18n::t(cx, "dialog.delete_file_note")
+                }
+                .as_str(),
+            ),
+            &[
+                crate::i18n::t(cx, "dialog.delete").as_str(),
+                crate::i18n::t(cx, "dialog.cancel").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -300,12 +311,18 @@ impl Workspace {
                     if let Some(tree) = &mut ws.tree {
                         match tree.delete(&node) {
                             Ok(()) => {
-                                ws.status_message =
-                                    Some(format!("Deleted \"{name}\""));
+                                ws.status_message = Some(crate::i18n::tf(
+                                    cx,
+                                    "status.deleted",
+                                    &[("name", &name)],
+                                ));
                             }
                             Err(e) => {
-                                ws.status_message =
-                                    Some(format!("Delete failed: {e}"));
+                                ws.status_message = Some(crate::i18n::tf(
+                                    cx,
+                                    "status.delete_failed",
+                                    &[("err", &e.to_string())],
+                                ));
                             }
                         }
                     }
@@ -349,12 +366,12 @@ impl Workspace {
         match outcome {
             Some(crate::overlay_input::InputKey::Submit) => {
                 let dialog = self.tree_dialog.take().expect("checked above");
-                window.focus(&self.focus);
+                window.focus(&self.active_focus());
                 self.apply_tree_dialog(dialog, cx);
             }
             Some(crate::overlay_input::InputKey::Cancel) => {
                 self.tree_dialog = None;
-                window.focus(&self.focus);
+                window.focus(&self.active_focus());
             }
             _ => {}
         }
@@ -369,28 +386,27 @@ impl Workspace {
         let result = match &dialog.kind {
             TreeDialogKind::NewFile => tree
                 .create_file(&dialog.parent, &name)
-                .map(|p| (p, "Created file")),
+                .map(|p| (p, crate::i18n::tf(cx, "status.created_file", &[("name", &name)]))),
             TreeDialogKind::NewFolder => tree
                 .create_dir(&dialog.parent, &name)
-                .map(|p| (p, "Created folder")),
+                .map(|p| (p, crate::i18n::tf(cx, "status.created_folder", &[("name", &name)]))),
             TreeDialogKind::Rename { old_path, .. } => tree
                 .rename(old_path, &name)
-                .map(|p| (p, "Renamed")),
+                .map(|p| (p, crate::i18n::tf(cx, "status.renamed", &[("name", &name)]))),
         };
         match result {
             Ok((path, verb)) => {
                 if let TreeDialogKind::Rename { old_path, .. } = &dialog.kind {
-                    self.model.retag_path(old_path, &path);
+                    self.retag_path_all(old_path, &path);
                 }
-                self.status_message =
-                    Some(format!("{verb} \"{}\"", name));
+                self.status_message = Some(verb);
                 // Созданное/переименованное — выделено в дереве.
                 if let Some(tree) = &mut self.tree {
                     tree.select(Some(&path));
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("{e}"));
+                self.status_message = Some(e.to_string());
             }
         }
         cx.notify();
@@ -428,7 +444,7 @@ impl Workspace {
         let Some(tree) = &mut self.tree else { return };
         match tree.move_into(from, to_dir) {
             Ok(new_path) => {
-                self.model.retag_path(from, &new_path);
+                self.retag_path_all(from, &new_path);
                 let name = from
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -437,10 +453,15 @@ impl Workspace {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| to_dir.display().to_string());
-                self.status_message = Some(format!("Moved \"{name}\" to \"{dir_name}\""));
+                self.status_message = Some(crate::i18n::tf(
+                    cx,
+                    "status.moved",
+                    &[("name", &name), ("dir", &dir_name)],
+                ));
             }
             Err(e) => {
-                self.status_message = Some(format!("Move failed: {e}"));
+                self.status_message =
+                    Some(crate::i18n::tf(cx, "status.move_failed", &[("err", &e.to_string())]));
             }
         }
         self.drop_target = None;
@@ -456,12 +477,12 @@ impl Workspace {
                 .px_3()
                 .py_1()
                 .text_size(px(11.0))
-                .text_color(rgb(DIM))
-                .child("No workspace open.")
+                .text_color(rgb(crate::theme::current().dim))
+                .child(crate::i18n::t(cx, "tree.empty"))
                 .child(
                     div()
-                        .text_color(rgb(PANEL_HEADER))
-                        .child("File → Open Workspace… (Cmd+Shift+O)"),
+                        .text_color(rgb(crate::theme::current().panel_header))
+                        .child(crate::i18n::t(cx, "tree.hint")),
                 );
         };
         let root = tree.root().to_path_buf();
@@ -480,11 +501,11 @@ impl Workspace {
             .py_1()
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(PANEL_HEADER))
+            .text_color(rgb(crate::theme::current().panel_header))
             .bg(rgb(if self.drop_target.as_deref() == Some(root.as_path()) {
-                SELECTION
+                crate::theme::current().selection
             } else {
-                PANEL
+                crate::theme::current().panel
             }))
             .rounded_sm()
             .debug_selector(move || format!("tree-row:{}", root_key.display()))
@@ -530,7 +551,7 @@ impl Workspace {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(rgb(PANEL_HEADER))
+                    .text_color(rgb(crate::theme::current().panel_header))
                     .child("▾"),
             )
             .child(div().min_w_0().text_ellipsis().child(root_name));
@@ -551,16 +572,20 @@ impl Workspace {
                 .pr_2()
                 .py_1()
                 .text_size(px(11.0))
-                .text_color(rgb(if row.is_dir { PANEL_HEADER } else { TEXT }))
-                .bg(rgb(if is_drop_target {
-                    SELECTION
-                } else if is_selected {
-                    CLOSE_HOVER
+                .text_color(rgb(if row.is_dir {
+                    crate::theme::current().panel_header
                 } else {
-                    PANEL
+                    crate::theme::current().text
+                }))
+                .bg(rgb(if is_drop_target {
+                    crate::theme::current().selection
+                } else if is_selected {
+                    crate::theme::current().close_hover
+                } else {
+                    crate::theme::current().panel
                 }))
                 .rounded_sm()
-                .hover(|d| d.bg(rgb(CLOSE_HOVER)))
+                .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
                 .debug_selector({
                     let key = format!("tree-row:{}", row.path.display());
                     move || key.clone()
@@ -569,7 +594,7 @@ impl Workspace {
                     div()
                         .flex_shrink_0()
                         .w(px(12.0))
-                        .text_color(rgb(if row.is_dir { PANEL_HEADER } else { DIM }))
+                        .text_color(rgb(if row.is_dir { crate::theme::current().panel_header } else { crate::theme::current().dim }))
                         .child(if row.is_dir { caret } else { "▪" }),
                 )
                 .child(div().min_w_0().text_ellipsis().child(row.name.clone()));
@@ -657,9 +682,9 @@ impl Workspace {
             .top(menu.position.y)
             .left(menu.position.x)
             .w(px(170.0))
-            .bg(rgb(TABBAR))
+            .bg(rgb(crate::theme::current().tabbar))
             .border_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .rounded_md()
             .text_size(px(11.0))
             .shadow_md()
@@ -668,27 +693,28 @@ impl Workspace {
             // съедает действие пункта — mouse_down раньше click).
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        let mut items: Vec<(&'static str, TreeMenuAction)> = vec![
-            ("New File…", TreeMenuAction::NewFile),
-            ("New Folder…", TreeMenuAction::NewFolder),
+        let mut items: Vec<(String, TreeMenuAction)> = vec![
+            (crate::i18n::t(cx, "tree.ctx_new_file"), TreeMenuAction::NewFile),
+            (crate::i18n::t(cx, "tree.ctx_new_folder"), TreeMenuAction::NewFolder),
         ];
         if !is_root {
-            items.push(("Rename…", TreeMenuAction::Rename));
-            items.push(("Delete", TreeMenuAction::Delete));
+            items.push((crate::i18n::t(cx, "tree.ctx_rename"), TreeMenuAction::Rename));
+            items.push((crate::i18n::t(cx, "tree.ctx_delete"), TreeMenuAction::Delete));
         }
         for (ix, (label, action)) in items.into_iter().enumerate() {
+            let label_for_sel = label.clone();
             menu_div = menu_div.child(
                 div()
                     .id(("ctx-menu-item", ix))
                     .px_3()
                     .py_1()
-                    .text_color(rgb(TEXT))
-                    .hover(|d| d.bg(rgb(CLOSE_HOVER)))
-                    .debug_selector(move || format!("ctx-menu:{label}"))
+                    .text_color(rgb(crate::theme::current().text))
+                    .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
+                    .debug_selector(move || format!("ctx-menu:{label_for_sel}"))
                     .on_click(cx.listener(move |this, _e, window, cx| {
                         this.run_context_menu_action(action.clone(), window, cx);
                     }))
-                    .child(label.to_string()),
+                    .child(label.clone()),
             );
         }
 
@@ -753,10 +779,15 @@ impl Workspace {
             return div();
         };
         let (title, placeholder) = match &dialog.kind {
-            TreeDialogKind::NewFile => ("New file name:", "name…"),
-            TreeDialogKind::NewFolder => ("New folder name:", "name…"),
+            TreeDialogKind::NewFile => {
+                (crate::i18n::t(cx, "tree.new_file_title"), crate::i18n::t(cx, "tree.name_placeholder"))
+            }
+            TreeDialogKind::NewFolder => (
+                crate::i18n::t(cx, "tree.new_folder_title"),
+                crate::i18n::t(cx, "tree.name_placeholder"),
+            ),
             TreeDialogKind::Rename { old_name, .. } => {
-                ("Rename to:", old_name.as_str())
+                (crate::i18n::t(cx, "tree.rename_title"), old_name.to_string())
             }
         };
         div()
@@ -770,19 +801,19 @@ impl Workspace {
             .gap_1()
             .px_3()
             .py_2()
-            .bg(rgb(TABBAR))
+            .bg(rgb(crate::theme::current().tabbar))
             .border_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .rounded_md()
             .text_size(px(12.0))
             .shadow_md()
             .track_focus(&self.tree_focus)
             .on_key_down(cx.listener(Self::handle_tree_dialog_key))
-            .child(div().text_color(rgb(DIM)).child(title))
+            .child(div().text_color(rgb(crate::theme::current().dim)).child(title))
             .child(
-                div().text_color(rgb(if dialog.input.is_empty() { DIM } else { TEXT }))
+                div().text_color(rgb(if dialog.input.is_empty() { crate::theme::current().dim } else { crate::theme::current().text }))
                     .child(if dialog.input.is_empty() {
-                        placeholder.to_string()
+                        placeholder
                     } else {
                         dialog.input.clone()
                     }),
@@ -790,8 +821,8 @@ impl Workspace {
             .child(
                 div()
                     .text_size(px(10.0))
-                    .text_color(rgb(DIM))
-                    .child("Enter — apply, Esc — cancel"),
+                    .text_color(rgb(crate::theme::current().dim))
+                    .child(crate::i18n::t(cx, "tree.dialog_hint")),
             )
     }
 }

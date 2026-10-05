@@ -152,7 +152,7 @@ async fn run(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
             ws.ensure_fold_view();
             let len = ws.visible_len().max(1);
             let target = (next_random() % len as u64) as usize;
-            ws.scroll.scroll_to_item(target, ScrollStrategy::Center);
+            ws.panes[0].scroll.scroll_to_item(target, ScrollStrategy::Center);
             cx.notify();
         });
         frame(&window, cx).await;
@@ -165,7 +165,7 @@ async fn run(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     for _ in 0..types {
         step(&window, cx, |ws, cx| {
             let t = Instant::now();
-            if let Some(tab) = ws.model.active_mut() {
+            if let Some(tab) = ws.model_mut().active_mut() {
                 tab.insert_text("x");
             }
             cx.notify();
@@ -184,7 +184,7 @@ async fn run(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     for op in 0..2 {
         step(&window, cx, |ws, cx| {
             let t = Instant::now();
-            if let Some(tab) = ws.model.active_mut() {
+            if let Some(tab) = ws.model_mut().active_mut() {
                 if op == 0 {
                     tab.undo();
                 } else {

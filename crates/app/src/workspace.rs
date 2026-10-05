@@ -1,23 +1,23 @@
 //! Workspace — корневой view приложения: сборка layout (левая панель
-//! «Project» — project_panel.rs, таб-бар — tab_bar.rs, редактор —
-//! editor_view.rs, статус-бар — status_bar.rs, overlay Cmd+G —
-//! goto_dialog.rs), кэш мапы видимых строк (folding) и свап
-//! scroll-позиций вкладок, сессия (persist/session_state).
+//! «Project» — project_panel.rs, панели split view с таб-барами —
+//! tab_bar.rs и редакторами — editor_view.rs, статус-бар —
+//! status_bar.rs, overlay Cmd+G — goto_dialog.rs), сессия
+//! (persist/session_state).
+//!
+//! Split view (8.1/D15.1): `panes` (1..=MAX_PANES) — независимые
+//! группы вкладок (Pane: модель + view-состояние, pane.rs);
+//! активная панель получает действия/поиск, клик активирует.
 //!
 //! Редактирование — только через tab_model → editor-core
 //! (Document::apply + History); курсоры смещаются правками через
 //! map_selection. Обработчики действий — editor_actions.rs, мышь —
 //! editor_mouse.rs, геометрия — geometry.rs.
 
-use gpui::{
-    Context, FocusHandle, Window, div, point, prelude::*, px, rgb, UniformListScrollHandle,
-};
+use gpui::{Context, FocusHandle, Window, div, point, prelude::*, px, rgb};
 
 use crate::actions::Quit;
-use crate::editor_mouse::DragState;
+use crate::pane::Pane;
 use crate::session::{self, SessionState, WindowGeometry};
-use crate::tab_model::TabModel;
-use crate::theme::*;
 
 /// Кэш мапы visible→real для uniform_list (4.5/D9.5, D11.2).
 ///
@@ -38,20 +38,36 @@ pub(crate) enum FoldView {
 
 /// Корневой view приложения.
 pub struct Workspace {
-    pub model: TabModel,
+    /// Панели split view (8.1): всегда ≥ 1, ≤ MAX_PANES.
+    pub panes: Vec<Pane>,
+    /// Индекс активной панели (действия меню, поиск, ввод).
+    pub active_pane: usize,
+    /// Синхронная прокрутка панелей (8.1): выключена по умолчанию.
+    pub sync_scroll: bool,
+    /// Выбор темы (8.2): System — по системной настройке.
+    pub theme_kind: crate::theme::ThemeKind,
+    /// Шрифт редактора (8.3): семейство + размер, применяется
+    /// немедленно, сохраняется в сессии.
+    pub font: crate::geometry::FontConfig,
+    /// Overlay выбора шрифта (8.3): буфер фильтра семейств.
+    pub font_dialog: Option<String>,
+    pub(crate) font_focus: gpui::FocusHandle,
+    /// Кэш системных семейств шрифта (all_font_names, 8.3).
+    pub(crate) all_fonts: Vec<String>,
+    /// Overlay выбора языка интерфейса (8.4): открыт/закрыт.
+    pub ui_lang_dialog: bool,
+    pub(crate) ui_lang_focus: gpui::FocusHandle,
+    /// Текущий язык интерфейса (8.4; зеркало глобали — для сессии).
+    pub ui_language: String,
+    /// Оверлей-справочник сочетаний (8.5).
+    pub shortcuts_open: bool,
+    pub(crate) shortcuts_focus: gpui::FocusHandle,
     pub focus: FocusHandle,
-    pub(crate) scroll: UniformListScrollHandle,
     /// Транзиентное сообщение статус-бара (ошибки открытия/сохранения,
     /// пропущенные при рестарте вкладки); живёт до следующего сообщения.
     pub status_message: Option<String>,
     /// Кэш заголовка окна (обновляем в render при изменении).
     pub(crate) rendered_title: Option<String>,
-    /// Индекс вкладки, чей scroll сейчас в `scroll` (свап при
-    /// переключении вкладок; после закрытия вкладки индекс может
-    /// указывать на соседку — допустимо для MVP, самокорректируется).
-    pub(crate) scroll_owner: Option<usize>,
-    /// Мышь в редакторе: активный драг/клик (4.2).
-    pub(crate) drag: Option<DragState>,
     /// Ширина char в px моноширинного шрифта, измеряется один раз через
     /// `window.text_system()` (4.2/D9.2).
     pub(crate) char_advance: Option<f32>,
@@ -74,11 +90,8 @@ pub struct Workspace {
     pub(crate) syntax_warmup_scheduled: bool,
     /// Вкладки сверх порога 20 МБ, ожидающие вопроса пользователю
     /// (диалог ставится, когда доступен Window — сессия/NOTEPAD_OPEN
-    /// собирают до окна, D12.4).
-    pub(crate) pending_threshold_tabs: Vec<usize>,
-    /// Кэш мапы видимых строк (folding, D9.5/D11.2): индекс вкладки +
-    /// состояние (`FoldView`). Пересчёт — по правилам `FoldView`.
-    pub(crate) fold_view: Option<(usize, FoldView)>,
+    /// собирают до окна, D12.4). (Панель, индекс вкладки).
+    pub(crate) pending_threshold_tabs: Vec<(usize, usize)>,
     /// Дерево воркспейса (группа 7): None — воркспейс не открыт.
     pub tree: Option<crate::fs_tree::FsTree>,
     /// Overlay-диалог ввода имени дерева (7.2): NewFile/NewFolder/
@@ -93,28 +106,36 @@ pub struct Workspace {
     /// останавливает поллинг старого поколения).
     pub(crate) fs_watch: Option<crate::fs_watch::FsWatch>,
     pub(crate) watch_generation: u64,
-    /// Полосы прокрутки (scrollbar.rs): handle левой панели, оверлея
-    /// языка и таб-бара (редактор — `scroll` выше); активный драг
+    /// Полосы прокрутки (scrollbar.rs): handle левой панели и оверлея
+    /// языка (редакторы и таб-бары — в панелях); активный драг
     /// ползунка (move/up слушают контейнеры зон).
     pub(crate) panel_scroll: gpui::ScrollHandle,
     pub(crate) language_scroll: gpui::ScrollHandle,
-    pub(crate) tab_scroll: gpui::ScrollHandle,
     pub(crate) thumb_drag: Option<crate::scrollbar::ThumbDrag>,
-    /// Горизонтальный скролл редактора (внешняя зона вокруг
-    /// uniform_list, editor_view.rs; вертикаль — в `scroll`).
-    pub(crate) h_scroll: gpui::ScrollHandle,
 }
 
 impl Workspace {
+    /// Максимум панелей split view (спека 8.1: «2 (и до 4)»).
+    pub const MAX_PANES: usize = 4;
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         Workspace {
-            model: TabModel::new(),
+            panes: vec![Pane::new(cx)],
+            active_pane: 0,
+            sync_scroll: false,
+            theme_kind: crate::theme::ThemeKind::System,
+            font: crate::geometry::FontConfig::default(),
+            font_dialog: None,
+            font_focus: cx.focus_handle(),
+            all_fonts: Vec::new(),
+            ui_lang_dialog: false,
+            ui_lang_focus: cx.focus_handle(),
+            ui_language: "en".to_string(),
+            shortcuts_open: false,
+            shortcuts_focus: cx.focus_handle(),
             focus: cx.focus_handle(),
-            scroll: UniformListScrollHandle::new(),
             status_message: None,
             rendered_title: None,
-            scroll_owner: None,
-            drag: None,
             char_advance: None,
             goto_input: None,
             goto_focus: cx.focus_handle(),
@@ -124,7 +145,6 @@ impl Workspace {
             search_focus: cx.focus_handle(),
             syntax_warmup_scheduled: false,
             pending_threshold_tabs: Vec::new(),
-            fold_view: None,
             tree: None,
             tree_dialog: None,
             tree_focus: cx.focus_handle(),
@@ -134,9 +154,7 @@ impl Workspace {
             watch_generation: 0,
             panel_scroll: gpui::ScrollHandle::new(),
             language_scroll: gpui::ScrollHandle::new(),
-            tab_scroll: gpui::ScrollHandle::new(),
             thumb_drag: None,
-            h_scroll: gpui::ScrollHandle::new(),
         }
     }
 
@@ -144,31 +162,33 @@ impl Workspace {
     /// (~сотни мс) + детект языков вкладок + первый разбор активной
     /// (ленивые контексты/regex'ы синтаксиса — вне рендера). Вызывается
     /// отложенно после первого кадра — холодный старт и открытие файлов
-    /// syntect не платят.
+    /// syntect не платят. Прогревает ВСЕ панели (split view).
     pub fn refresh_all_languages(&mut self, cx: &mut Context<Self>) {
-        for i in 0..self.model.len() {
-            if let Some(tab) = self.model.tab_mut(i) {
+        for pane in &mut self.panes {
+            for tab in pane.model.tabs_mut() {
                 tab.refresh_language();
             }
-        }
-        // Прогреть грамматику активной вкладки (ленивая десериализация
-        // контекстов + компиляция regex'ов — разовая цена, D12.1).
-        if let Some(tab) = self.model.active_mut()
-            && tab.highlight.syntax_name().is_some() {
-                let lines = tab.doc.len_lines();
-                tab.highlight.ensure_window(&tab.doc, 0, lines.min(64));
+            // Прогреть грамматику активной вкладки панели (ленивая
+            // десериализация контекстов + компиляция regex'ов).
+            if let Some(tab) = pane.model.active_mut()
+                && tab.highlight.syntax_name().is_some() {
+                    let lines = tab.doc.len_lines();
+                    tab.highlight.ensure_window(&tab.doc, 0, lines.min(64));
             }
+        }
         // Фоновый проход чекпоинтами — сразу, не ждать пользовательских
         // прыжков (большой файл красится сам, прыжок вглубь дёшев).
-        for i in 0..self.model.len() {
-            self.spawn_background_highlight(i, cx);
+        for pi in 0..self.panes.len() {
+            for ix in 0..self.panes[pi].model.len() {
+                self.spawn_background_highlight(pi, ix, cx);
+            }
         }
     }
 
     /// Фоновая раскраска файла чекпоинтами (BackgroundWalk) — ходка
     /// ВЕСЬ файл сразу после открытия, не дожидаясь пользовательских
     /// прыжков: после неё любой прыжок = ≤ CHECKPOINT_EVERY строк
-    /// кадрового догонa. Тактики: syntect/onig-состояния НЕ Send —
+    /// кадрового догона. Тактики: syntect/onig-состояния НЕ Send —
     /// фоновой поток невозможен; ходка идёт НА ГЛАВНОМ потоке таймером
     /// (тик 25 мс, бюджет 5 мс — между кадрами, UI не рвётся). Правка
     /// НИЖЕ курсора ходки безвредна (rope актуален, стек границы
@@ -177,14 +197,21 @@ impl Workspace {
     /// паузы (1 с тишины). Смена языка/закрытие вкладки — стоп.
     /// Мелкие файлы (≤ 2 чекпоинтов) не ходим — кадровый
     /// ensure_window дешевле.
-    pub(crate) fn spawn_background_highlight(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn spawn_background_highlight(
+        &mut self,
+        pi: usize,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) {
         /// Тик ходки (главный поток, между кадрами).
         const TICK: std::time::Duration = std::time::Duration::from_millis(25);
         /// CPU-бюджет порции на тик — больше кадра не занимать.
         const TICK_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
         /// Пауза перед перезапуском ходки после правок (тишина ввода).
         const RESTART_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
-        let Some(tab) = self.model.tab_mut(ix) else { return };
+        let Some(tab) = self.panes.get_mut(pi).and_then(|p| p.model.tab_mut(ix)) else {
+            return;
+        };
         if tab.bg_walk_started {
             return;
         }
@@ -217,7 +244,11 @@ impl Workspace {
                 }
                 let step = this
                     .update(cx, |ws: &mut Self, cx| {
-                    let Some(tab) = ws.model.tab_mut(ix) else {
+                    let Some(tab) = ws
+                        .panes
+                        .get_mut(pi)
+                        .and_then(|p| p.model.tab_mut(ix))
+                    else {
                         return Step::Dead; // вкладка закрыта
                     };
                     if expected_syntax.as_deref() != tab.highlight.syntax_name() {
@@ -263,12 +294,10 @@ impl Workspace {
     /// точек открытия (диалог, сессия, NOTEPAD_OPEN).
     #[allow(dead_code)] // уведомление порога живёт в ask_pending_threshold (D12.4);
                         // метод оставлен как API точек открытия (паттерн D10.4)
-    pub(crate) fn note_highlight_threshold(&mut self) {
-        if let Some(tab) = self.model.active()
+    pub(crate) fn note_highlight_threshold(&mut self, cx: &gpui::App) {
+        if let Some(tab) = self.model().active()
             && tab.language.disabled() {
-                self.status_message = Some(
-                    "Syntax highlighting is off: file exceeds 20 MB".to_string(),
-                );
+                self.status_message = Some(crate::i18n::t(cx, "hl.off_threshold"));
             }
     }
 
@@ -279,13 +308,16 @@ impl Workspace {
         if crate::bench::enabled() {
             return;
         }
-        for i in 0..self.model.len() {
-            let over = self
-                .model
-                .tab_mut(i)
-                .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed);
-            if over && !self.pending_threshold_tabs.contains(&i) {
-                self.pending_threshold_tabs.push(i);
+        for pi in 0..self.panes.len() {
+            for i in 0..self.panes[pi].model.len() {
+                let over = self
+                    .panes[pi]
+                    .model
+                    .tab_mut(i)
+                    .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed);
+                if over && !self.pending_threshold_tabs.contains(&(pi, i)) {
+                    self.pending_threshold_tabs.push((pi, i));
+                }
             }
         }
     }
@@ -295,11 +327,12 @@ impl Workspace {
     /// (догон с бюджетом держит кадры), отказ — выключена, сообщение.
     pub fn ask_pending_threshold(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let indices = std::mem::take(&mut self.pending_threshold_tabs);
-        let indices: Vec<usize> = indices
+        let indices: Vec<(usize, usize)> = indices
             .into_iter()
-            .filter(|&i| {
-                self.model
-                    .tab_mut(i)
+            .filter(|&(pi, i)| {
+                self.panes
+                    .get_mut(pi)
+                    .and_then(|p| p.model.tab_mut(i))
                     .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed)
             })
             .collect();
@@ -308,16 +341,19 @@ impl Workspace {
         }
         let count = indices.len();
         let single = count == 1;
-        let message: std::borrow::Cow<'static, str> = if single {
-            "This file is over 20 MB. Enable syntax highlighting anyway?".into()
+        let message = if single {
+            crate::i18n::t(cx, "dialog.threshold_single")
         } else {
-            format!("{count} opened files are over 20 MB. Enable syntax highlighting for them anyway?").into()
+            crate::i18n::tf(cx, "dialog.threshold_many", &[("n", &count.to_string())])
         };
         let rx = window.prompt(
             gpui::PromptLevel::Warning,
             &message,
-            Some("Highlighting large files is progressive (budgeted per frame); scrolling and typing stay responsive."),
-            &["Enable", "Keep off"],
+            Some(&crate::i18n::t(cx, "dialog.threshold_note")),
+            &[
+                crate::i18n::t(cx, "dialog.enable").as_str(),
+                crate::i18n::t(cx, "dialog.keep_off").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -325,22 +361,22 @@ impl Workspace {
             this.update_in(cx, |ws, _window, cx| {
                 match choice {
                     0 => {
-                        for i in indices {
-                            if let Some(tab) = ws.model.tab_mut(i) {
+                        for (pi, i) in indices {
+                            if let Some(tab) =
+                                ws.panes.get_mut(pi).and_then(|p| p.model.tab_mut(i))
+                            {
                                 tab.allow_highlight_despite_threshold();
                                 // Язык включён — фоновая ходка чекпоинтами
                                 // (пропущенная на открытии: синтаксиса не было).
-                                ws.spawn_background_highlight(i, cx);
+                                ws.spawn_background_highlight(pi, i, cx);
                             }
                         }
-                        ws.status_message = Some(
-                            "Syntax highlighting enabled for large file(s)".to_string(),
-                        );
+                        ws.status_message =
+                            Some(crate::i18n::t(cx, "hl.enabled_large"));
                     }
                     _ => {
-                        ws.status_message = Some(
-                            "Syntax highlighting is off: file exceeds 20 MB".to_string(),
-                        );
+                        ws.status_message =
+                            Some(crate::i18n::t(cx, "hl.off_threshold"));
                     }
                 }
                 cx.notify();
@@ -350,22 +386,24 @@ impl Workspace {
         .detach();
     }
 
-    /// Применить операцию к активной вкладке (вкладок нет — no-op) и
-    /// перерисовать. Схлопывает повтор `if let Some(tab) = ...;
-    /// cx.notify()` обработчиков действий (editor_actions.rs).
+    /// Применить операцию к активной вкладке активной панели (вкладок
+    /// нет — no-op) и перерисовать. Схлопывает повтор
+    /// `if let Some(tab) = ...; cx.notify()` обработчиков действий
+    /// (editor_actions.rs).
     pub(crate) fn with_active_tab(
         &mut self,
         op: impl FnOnce(&mut crate::buffer_tab::BufferTab),
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.model.active_mut() {
+        if let Some(tab) = self.model_mut().active_mut() {
             op(tab);
         }
         cx.notify();
     }
 
-    /// Пересчитать мапу видимых строк, если устарела. Вызывается перед
-    /// любым использованием мапы (рендер, координаты мыши, скролл).
+    /// Пересчитать мапу видимых строк панели `pi`, если устарела.
+    /// Вызывается перед любым использованием мапы (рендер, координаты
+    /// мыши, скролл). Активная панель — `ensure_fold_view`.
     ///
     /// Правила инвалидации (D11.2): тождественная мапа живёт, пока
     /// фолдов нет (правки текста folded-флаги не трогают); материальная
@@ -374,15 +412,17 @@ impl Workspace {
     /// Undo/redo меняет folded-флаги только вместе с LineMeta-синком
     /// правок (Document::apply) — счётчик folded_count это покрывает:
     /// 0→N ловится переходом Identity→Mapped, N→0 — обратно.
-    pub(crate) fn ensure_fold_view(&mut self) {
-        let Some(ix) = self.model.active_index() else {
-            self.fold_view = None;
+    pub(crate) fn ensure_fold_view_of(&mut self, pi: usize) {
+        let Some(ix) = self.panes[pi].model.active_index() else {
+            self.panes[pi].fold_view = None;
             return;
         };
-        let tab = &self.model.tabs()[ix];
-        let folded = tab.doc.line_meta().folded_count();
-        let version = tab.view_version();
-        let need = match &self.fold_view {
+        let folded = self.panes[pi].model.tabs()[ix]
+            .doc
+            .line_meta()
+            .folded_count();
+        let version = self.panes[pi].model.tabs()[ix].view_version();
+        let need = match &self.panes[pi].fold_view {
             Some((cached_ix, view)) if *cached_ix == ix => match view {
                 FoldView::Identity => folded > 0,
                 FoldView::Mapped { version: v, .. } => folded == 0 || *v != version,
@@ -390,31 +430,36 @@ impl Workspace {
             _ => true, // вкладки сменились / кэша нет
         };
         if need {
-            self.fold_view = Some((
+            let doc = &self.panes[pi].model.tabs()[ix].doc;
+            self.panes[pi].fold_view = Some((
                 ix,
                 if folded == 0 {
                     FoldView::Identity
                 } else {
-                    FoldView::Mapped { version, map: crate::folding::visible_lines(&tab.doc) }
+                    FoldView::Mapped { version, map: crate::folding::visible_lines(doc) }
                 },
             ));
         }
     }
 
+    /// Пересчёт мапы активной панели.
+    pub(crate) fn ensure_fold_view(&mut self) {
+        self.ensure_fold_view_of(self.active_pane);
+    }
+
     /// Индекс uniform_list (видимый) → real-строка документа (мапа
-    /// folding, D9.5). Скрытых индексов не бывает; тождественная мапа —
-    /// видимый индекс и есть real-строка.
-    pub(crate) fn visible_to_real(&self, ix: usize) -> usize {
-        match &self.fold_view {
+    /// folding, D9.5) панели `pi`.
+    pub(crate) fn visible_to_real_of(&self, pi: usize, ix: usize) -> usize {
+        match &self.panes[pi].fold_view {
             Some((_, FoldView::Mapped { map, .. })) => map.get(ix).copied().unwrap_or(ix),
             _ => ix,
         }
     }
 
-    /// Сколько элементов сейчас в uniform_list (видимых строк).
-    pub(crate) fn visible_len(&self) -> usize {
-        match &self.fold_view {
-            Some((_, FoldView::Identity)) => self
+    /// Сколько элементов сейчас в uniform_list (видимых строк) панели.
+    pub(crate) fn visible_len_of(&self, pi: usize) -> usize {
+        match &self.panes[pi].fold_view {
+            Some((_, FoldView::Identity)) => self.panes[pi]
                 .model
                 .active()
                 .map(|t| t.doc.len_lines())
@@ -424,32 +469,45 @@ impl Workspace {
         }
     }
 
-    /// Прокрутить к real-строке (через мапу видимых), стратегия —
-    /// центр вьюпорта. Скрытая строка сначала поднимается к заголовку
-    /// фолда (D9.5).
+    /// Активная панель: видимый индекс → real-строка.
+    pub(crate) fn visible_to_real(&self, ix: usize) -> usize {
+        self.visible_to_real_of(self.active_pane, ix)
+    }
+
+    /// Активная панель: число видимых строк.
+    pub(crate) fn visible_len(&self) -> usize {
+        self.visible_len_of(self.active_pane)
+    }
+
+    /// Прокрутить активную панель к real-строке (через мапу видимых),
+    /// стратегия — центр вьюпорта. Скрытая строка сначала поднимается
+    /// к заголовку фолда (D9.5).
     pub(crate) fn scroll_to_line(&mut self, line: usize) {
         self.ensure_fold_view();
         let line = self
-            .model
+            .model()
             .active()
             .map(|t| t.visible_line_or_header(line))
             .unwrap_or(line);
         let vis = self.real_to_visible(line);
-        self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
+        self.pane_mut()
+            .scroll
+            .scroll_to_item(vis, gpui::ScrollStrategy::Center);
     }
 
-    /// Немедленная прокрутка к real-строке с центрированием (переходы
-    /// поиска 6.1–6.4): ловушка deferred-скролла D12.5 —
-    /// `scroll_to_item` применяется в prepaint ПОСЛЕ render, кадр после
-    /// клика по ‹/› строится по СТАРОМУ offset и в живом окне «догонял»
-    /// только следующим событием. Ставим целевой offset в общий Rc
-    /// (тот же, что читает render) НЕМЕДЛЕННО + `scroll_to_item` тем же
-    /// индексом — deferred подтвердит значение (паттерн клика по
-    /// липкой шапке D12.5).
+    /// Немедленная прокрутка активной панели к real-строке с
+    /// центрированием (переходы поиска 6.1–6.4): ловушка
+    /// deferred-скролла D12.5 — `scroll_to_item` применяется в
+    /// prepaint ПОСЛЕ render, кадр после клика по ‹/› строится по
+    /// СТАРОМУ offset и в живом окне «догонял» только следующим
+    /// событием. Ставим целевой offset в общий Rc (тот же, что читает
+    /// render) НЕМЕДЛЕННО + `scroll_to_item` тем же индексом —
+    /// deferred подтвердит значение (паттерн клика по липкой шапке
+    /// D12.5).
     pub(crate) fn scroll_to_line_now(&mut self, line: usize) {
         self.ensure_fold_view();
         let line = self
-            .model
+            .model()
             .active()
             .map(|t| t.visible_line_or_header(line))
             .unwrap_or(line);
@@ -458,38 +516,75 @@ impl Workspace {
             .editor_bounds()
             .map(|b| f32::from(b.size.height))
             .unwrap_or(0.0);
+        let scroll = self.pane().scroll.clone();
         if viewport_h <= 0.0 {
             // Редактор ещё не отрисован — только deferred-путь.
-            self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
+            scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
             return;
         }
-        let content_h = self.visible_len() as f32 * crate::geometry::LINE_HEIGHT;
+        let line_h = self.line_height();
+        let content_h = self.visible_len() as f32 * line_h;
         // Центр вьюпорта на середине строки (семантика Center).
-        let target = vis as f32 * crate::geometry::LINE_HEIGHT
-            + crate::geometry::LINE_HEIGHT / 2.0
-            - viewport_h / 2.0;
+        let target = vis as f32 * line_h + line_h / 2.0 - viewport_h / 2.0;
         let y = target.clamp(0.0, (content_h - viewport_h).max(0.0));
-        self.scroll
+        scroll
             .0
             .borrow()
             .base_handle
             .set_offset(point(px(0.0), px(-y)));
-        self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
+        scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
     }
 
-    /// real-строка → индекс uniform_list (видимый); скрытая строка —
-    /// её заголовок. Тождественная мапа: clamp в последнюю строку
-    /// (как fallback материальной).
+    /// real-строка → индекс uniform_list (видимый) активной панели;
+    /// скрытая строка — её заголовок. Тождественная мапа: clamp в
+    /// последнюю строку (как fallback материальной).
     fn real_to_visible(&self, line: usize) -> usize {
         let line = self
-            .model
+            .model()
             .active()
             .map(|t| t.visible_line_or_header(line))
             .unwrap_or(line);
-        match &self.fold_view {
-            Some((_, FoldView::Mapped { map, .. })) => crate::folding::real_to_visible(map, line)
-                .unwrap_or_else(|| map.len().saturating_sub(1)),
+        match &self.pane().fold_view {
+            Some((_, FoldView::Mapped { map, .. })) => {
+                crate::folding::real_to_visible(map, line)
+                    .unwrap_or_else(|| map.len().saturating_sub(1))
+            }
             _ => line.min(self.visible_len().saturating_sub(1)),
+        }
+    }
+
+    /// Свап scroll-позиции вкладок панели `pi` (D8.4): уходящая вкладка
+    /// запоминает текущее смещение, входящая восстанавливает; соседние
+    /// панели не трогаются. Горизонтальный скролл не свапится (MVP):
+    /// сброс — входящая вкладка начинает от левого края.
+    pub(crate) fn swap_pane_scroll(&mut self, pi: usize) {
+        let active_ix = self.panes[pi].model.active_index();
+        if self.panes[pi].scroll_owner != active_ix {
+            if let Some(owner) = self.panes[pi].scroll_owner {
+                let y = f32::from(
+                    self.panes[pi]
+                        .scroll
+                        .0
+                        .borrow()
+                        .base_handle
+                        .offset()
+                        .y,
+                );
+                if let Some(tab) = self.panes[pi].model.tab_mut(owner) {
+                    tab.scroll_y = y;
+                }
+            }
+            if let Some(ix) = active_ix {
+                let y = self.panes[pi].model.tabs()[ix].scroll_y;
+                self.panes[pi]
+                    .scroll
+                    .0
+                    .borrow()
+                    .base_handle
+                    .set_offset(point(px(0.0), px(y)));
+            }
+            self.panes[pi].h_scroll.set_offset(point(px(0.0), px(0.0)));
+            self.panes[pi].scroll_owner = active_ix;
         }
     }
 
@@ -501,24 +596,37 @@ impl Workspace {
 
     // ---- Сессия (3.4) ----
 
-    /// Собрать состояние сессии из модели: только вкладки с путями
-    /// (untitled не восстанавливаются — D8.4), активная — пересчитанный
-    /// индекс среди сохранённых.
+    /// Собрать состояние сессии из моделей ВСЕХ паней: только вкладки
+    /// с путями (untitled не восстанавливаются — D8.4), активная —
+    /// пересчитанный индекс в объединённом списке. Раскладка split не
+    /// восстанавливается (MVP 8.1): все вкладки открываются в одну
+    /// панель.
     pub fn session_state(&self, geometry: Option<WindowGeometry>) -> SessionState {
         let mut tabs = Vec::new();
         let mut active_tab = None;
-        for (i, t) in self.model.tabs().iter().enumerate() {
-            let Some(path) = &t.path else { continue };
-            if self.model.active_index() == Some(i) {
-                active_tab = Some(tabs.len());
+        for (pi, pane) in self.panes.iter().enumerate() {
+            for (i, t) in pane.model.tabs().iter().enumerate() {
+                let Some(path) = &t.path else { continue };
+                if self.active_pane == pi && pane.model.active_index() == Some(i) {
+                    active_tab = Some(tabs.len());
+                }
+                tabs.push(session::SessionTab { path: path.clone() });
             }
-            tabs.push(session::SessionTab { path: path.clone() });
         }
         SessionState {
             // Воркспейс (7.4): путь последнего открытого дерева.
             workspace: self.tree.as_ref().map(|t| t.root().to_path_buf()),
             tabs,
             active_tab,
+            // Тема (8.2): выбор сохраняется между сессиями.
+            theme: Some(self.theme_kind.as_str().to_string()),
+            // Шрифт (8.3): настройка сохраняется между сессиями.
+            font: Some(session::FontSettings {
+                family: self.font.family.clone(),
+                size: self.font.size,
+            }),
+            // Язык интерфейса (8.4).
+            language: Some(self.ui_language.clone()),
             window: geometry,
         }
     }
@@ -555,6 +663,112 @@ impl gpui::Focusable for Workspace {
     }
 }
 
+impl Workspace {
+    /// Область панелей редактора (8.1/D15.1): 1 — целиком; 2 — строка
+    /// с вертикальным разделителем; 3–4 — сетка 2×2 (3-я панель
+    /// занимает нижнюю строку). Каждая панель — своя колонка
+    /// [таб-бар | редактор]; таб-бары независимы (вкладки панелей).
+    fn render_pane_area(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // Разделители 1px между панелями (читаемость границ).
+        fn v_divider() -> gpui::Div {
+            div()
+                .w(px(1.0))
+                .flex_shrink_0()
+                .bg(rgb(crate::theme::current().tabbar))
+        }
+        fn h_divider() -> gpui::Div {
+            div()
+                .h(px(1.0))
+                .flex_shrink_0()
+                .bg(rgb(crate::theme::current().tabbar))
+        }
+        match self.panes.len() {
+            1 => self.render_pane(0, window, cx).into_any_element(),
+            2 => div()
+                .id("pane-row")
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .child(self.render_pane(0, window, cx))
+                .child(v_divider())
+                .child(self.render_pane(1, window, cx))
+                .into_any_element(),
+            n => {
+                // 3–4: сетка 2×2 — строки по две панели.
+                let mut bottom = div()
+                    .id("pane-row-bottom")
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_pane(2, window, cx));
+                if n == 4 {
+                    bottom = bottom
+                        .child(v_divider())
+                        .child(self.render_pane(3, window, cx));
+                }
+                div()
+                    .id("pane-grid")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("pane-row-top")
+                            .flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.render_pane(0, window, cx))
+                            .child(v_divider())
+                            .child(self.render_pane(1, window, cx)),
+                    )
+                    .child(h_divider())
+                    .child(bottom)
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Одна панель: колонка [таб-бар (+кнопки) | редактор]. Клик по
+    /// панели активирует её (фокус редактора — паттерн VS Code).
+    fn render_pane(
+        &mut self,
+        pi: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .id(("pane", pi))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _e, window, cx| {
+                    this.focus_pane(pi, window, cx);
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .bg(rgb(crate::theme::current().tabbar))
+                    // Обёртка таб-бара несёт flex_1/min_w_0 (полоса —
+                    // оверлей внутри, tab_bar.rs).
+                    .child(self.render_tab_bar(pi, cx))
+                    .child(self.render_reorder_buttons(pi, cx)),
+            )
+            .child(self.render_editor(pi, window, cx))
+            .into_any_element()
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Бенчмарк-стенд (D11.1) и панель PERFORMANCE (D11.8): один
@@ -562,8 +776,19 @@ impl Render for Workspace {
         // элементное дерево), без vsync-ожидания.
         let frame_started = std::time::Instant::now();
 
-        // Мапа видимых строк (folding, D9.5) — пересчёт при устаревании.
-        self.ensure_fold_view();
+        // Тема (8.2): разрешение выбора на каждом кадре — System
+        // следует системной настройке без перезапуска; смена палитры
+        // перерисовывает всё (рендеры читают theme::current()).
+        let resolved = self.theme_kind.resolve(window.appearance());
+        if !std::ptr::eq(resolved, crate::theme::current()) {
+            crate::theme::set_current(resolved);
+        }
+
+        // Мапы видимых строк (folding, D9.5) — пересчёт при устаревании,
+        // для КАЖДОЙ панели.
+        for pi in 0..self.panes.len() {
+            self.ensure_fold_view_of(pi);
+        }
 
         // Прогрев подсветки (D12.1): один раз, отложенно (50 мс) после
         // первого кадра — инициализация syntect и первый разбор НЕ на
@@ -590,64 +815,34 @@ impl Render for Workspace {
             crate::bench::record_first_frame();
         }
 
-        // Заголовок окна = активная вкладка (кэш — set только при
-        // изменении, чтобы не перерисовывать окно каждый кадр).
+        // Заголовок окна = активная вкладка активной панели (кэш — set
+        // только при изменении, чтобы не перерисовывать окно каждый кадр).
         let desired_title = self
-            .model
+            .model()
             .active_index()
-            .and_then(|i| self.model.title(i))
+            .and_then(|i| self.model().title(i))
             .unwrap_or_else(|| "notepad+".to_string());
         if self.rendered_title.as_deref() != Some(desired_title.as_str()) {
             window.set_window_title(&desired_title);
             self.rendered_title = Some(desired_title);
         }
 
-        // Свап scroll-позиции при переключении вкладки (D8.4): уходящая
-        // вкладка запоминает текущее смещение, входящая восстанавливает.
-        let active_ix = self.model.active_index();
-        if self.scroll_owner != active_ix {
-            if let Some(owner) = self.scroll_owner {
-                let y = f32::from(self.scroll.0.borrow().base_handle.offset().y);
-                if let Some(tab) = self.model.tab_mut(owner) {
-                    tab.scroll_y = y;
-                }
-            }
-            if let Some(ix) = active_ix {
-                let y = self.model.tabs()[ix].scroll_y;
-                self.scroll
-                    .0
-                    .borrow()
-                    .base_handle
-                    .set_offset(point(px(0.0), px(y)));
-            }
-            // Горизонтальный скролл не свапится по вкладкам (MVP):
-            // сброс — входящая вкладка начинает от левого края.
-            self.h_scroll.set_offset(point(px(0.0), px(0.0)));
-            self.scroll_owner = active_ix;
+        // Свап scroll-позиций при переключении вкладок (D8.4) — для
+        // каждой панели независимо.
+        for pi in 0..self.panes.len() {
+            self.swap_pane_scroll(pi);
         }
 
-        // Левая панель и кнопки перестановки — свои модули.
+        // Левая панель — свой модуль.
         let project_panel = self.render_project_panel(cx);
-        let reorder_buttons = self.render_reorder_buttons(cx);
 
-        // Центральная колонка: таб-бар + редактор.
+        // Центральная колонка: область панелей редактора.
         let center = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .bg(rgb(TABBAR))
-                    // Обёртка таб-бара несёт flex_1/min_w_0 (полоса —
-                    // оверлей внутри, tab_bar.rs).
-                    .child(self.render_tab_bar(cx))
-                    .child(reorder_buttons),
-            )
-                    .child(self.render_editor(window, cx));
+            .child(self.render_pane_area(window, cx));
 
         // Корень: [ панель | центр ] по горизонтали + статус-бар внизу.
         // Действия вешаем на корень (а не на редактор): работают и при
@@ -657,8 +852,8 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(crate::theme::current().bg))
+            .text_color(rgb(crate::theme::current().text))
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_open_workspace))
             .on_action(cx.listener(Self::on_new_file))
@@ -668,6 +863,22 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_as))
             .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_split_editor))
+            .on_action(cx.listener(Self::on_close_pane))
+            .on_action(cx.listener(Self::on_toggle_sync_scroll))
+            .on_action(cx.listener(Self::on_theme_system))
+            .on_action(cx.listener(Self::on_theme_dark))
+            .on_action(cx.listener(Self::on_theme_light))
+            .on_action(cx.listener(Self::on_open_font_dialog))
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_zoom_reset))
+            .on_action(cx.listener(Self::on_open_ui_language_dialog))
+            .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_prev_tab))
+            .on_action(cx.listener(Self::on_show_shortcuts))
+            .on_action(cx.listener(Self::on_cycle_language))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_go_to_line))
@@ -715,6 +926,15 @@ impl Render for Workspace {
         }
         if self.language_input.is_some() {
             root = root.child(self.render_language_overlay(cx));
+        }
+        if self.font_dialog.is_some() {
+            root = root.child(self.render_font_overlay(cx));
+        }
+        if self.ui_lang_dialog {
+            root = root.child(self.render_ui_language_overlay(cx));
+        }
+        if self.shortcuts_open {
+            root = root.child(self.render_shortcuts_overlay(cx));
         }
         // Контекстное меню дерева (с подложкой) и диалог имён — дети
         // корня (паттерн goto/language overlay, D9.2).

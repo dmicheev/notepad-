@@ -1,0 +1,225 @@
+# English UI strings (source of truth, 8.4/D15.4). Ключи — плоские
+# точки; файлы других языков кладутся в <data>/notepad-plus/locales/.
+# Плейсхолдеры: {n}, {m}, {file}, {title}, {err}…
+
+[menu.name]
+file = "File"
+edit = "Edit"
+navigate = "Navigate"
+view = "View"
+search = "Search"
+text = "Text"
+theme = "Theme"
+
+[menu.app]
+quit = "Quit"
+
+[menu.file]
+new_file = "New File"
+new_folder = "New Folder"
+open = "Open…"
+open_workspace = "Open Workspace…"
+save = "Save"
+save_as = "Save As…"
+close_tab = "Close Tab"
+
+[menu.edit]
+undo = "Undo"
+redo = "Redo"
+
+[menu.navigate]
+go_to_line = "Go to Line…"
+toggle_bookmark = "Toggle Bookmark"
+next_bookmark = "Next Bookmark"
+prev_bookmark = "Previous Bookmark"
+
+[menu.view]
+interface_language = "Interface Language…"
+choose_language = "Choose Language…"
+split_editor = "Split Editor"
+close_pane = "Close Pane"
+sync_scroll = "Synchronize Scrolling"
+font = "Font…"
+fold_all = "Fold All"
+unfold_all = "Unfold All"
+
+[menu.view.theme]
+system = "System"
+dark = "Dark"
+light = "Light"
+
+[menu.search]
+find = "Find…"
+find_in_tabs = "Find in Tabs…"
+find_in_folder = "Find in Folder…"
+
+[menu.text]
+sort_asc = "Sort Lines Ascending"
+sort_desc = "Sort Lines Descending"
+sort_asc_ic = "Sort Lines Ascending (Ignore Case)"
+sort_desc_ic = "Sort Lines Descending (Ignore Case)"
+dedupe = "Remove Duplicate Lines"
+remove_empty = "Remove Empty Lines"
+upper = "UPPER CASE"
+lower = "lower case"
+title = "Title Case"
+sentence = "Sentence case"
+
+[editor]
+empty_hint = "No tabs open — press Cmd+O to open a file, or + for a new tab"
+
+[status]
+cursors = "{n} cursors"
+skipped_tabs = "Skipped {n} tab(s), file(s) no longer exist: {files}"
+session_read_failed = "Could not read session: {err}"
+open_failed = "Could not open {file}: {err}"
+save_failed = "Save failed: {err}"
+sync_scroll_on = "Synchronized scrolling on"
+sync_scroll_off = "Synchronized scrolling off"
+workspace_open_failed = "Could not open workspace {path}: {err}"
+watch_unavailable = "File watching unavailable: {err}"
+no_workspace = "No workspace open (Cmd+Shift+O to open)"
+select_to_rename = "Select an item in the tree to rename"
+select_to_delete = "Select an item in the tree to delete"
+cannot_rename_root = "Cannot rename workspace root"
+cannot_delete_root = "Cannot delete workspace root"
+created_file = "Created file \"{name}\""
+created_folder = "Created folder \"{name}\""
+renamed = "Renamed \"{name}\""
+deleted = "Deleted \"{name}\""
+delete_failed = "Delete failed: {err}"
+moved = "Moved \"{name}\" to \"{dir}\""
+move_failed = "Move failed: {err}"
+
+[dialog]
+open_files = "Open files"
+open_workspace = "Open Workspace"
+choose_folder = "Choose folder to search"
+dirty_title = "Do you want to save the changes you made in \"{title}\"?"
+dirty_message = "Your changes will be lost if you don't save them."
+save = "Save"
+dont_save = "Don't Save"
+cancel = "Cancel"
+threshold_single = "This file is over 20 MB. Enable syntax highlighting anyway?"
+threshold_many = "{n} opened files are over 20 MB. Enable syntax highlighting for them anyway?"
+threshold_note = "Highlighting large files is progressive (budgeted per frame); scrolling and typing stay responsive."
+enable = "Enable"
+keep_off = "Keep off"
+delete_title = "Delete \"{name}\"?"
+delete_file_note = "The file will be deleted permanently."
+delete_folder_note = "The folder and all its contents will be deleted permanently."
+delete = "Delete"
+replace_in_files_title = "Replace all matches in {n} file(s)?"
+replace_in_files_note = "Files are opened as modified tabs; nothing is written to disk until you save."
+replace = "Replace"
+
+[goto]
+label = "Go to line:"
+placeholder = "line number…"
+
+[lang]
+label = "Language:"
+filter_placeholder = "type to filter…"
+auto_detect = "Auto-detect"
+ui_label = "Interface language:"
+ui_hint = "Restart is not needed; missing keys fall back to English."
+
+[font]
+label = "Font:"
+filter_placeholder = "{family} {size} — type to filter…"
+
+[panel]
+explorer = "EXPLORER"
+bookmarks = "BOOKMARKS ({n})"
+search = "SEARCH ({n})"
+search_scanning = "SEARCH ({n}… scanning)"
+
+[search]
+scope_file = "File"
+scope_tabs = "Tabs"
+scope_folder = "Folder"
+placeholder = "Search…"
+placeholder_enter = "Search (press Enter)…"
+replace_placeholder = "Replace with…"
+mask_label = "mask:"
+mask_placeholder = "*.rs  *.{ts,tsx}"
+replace = "Replace"
+replace_all_button = "All"
+replace_in_files = "Replace All…"
+no_results = "No results"
+press_enter = "Press Enter to search"
+invalid_pattern = "Invalid pattern: {err}"
+pattern_invalid_status = "Invalid search pattern: {err}"
+scanning = "Scanning…"
+summary = "{hits} match(es) in {files} file(s)"
+summary_truncated_suffix = " (truncated)"
+summary_hits_only = "{n} match(es)"
+status_summary = "Search: {hits} match(es) in {files} file(s)"
+replaced = "Replaced {n} occurrence(s)"
+replaced_files = "Replaced {n} occurrence(s) in {m} file(s) — not saved to disk"
+no_matches_to_replace = "No matches to replace (files may have changed)"
+
+[hl]
+off_threshold = "Syntax highlighting is off: file exceeds 20 MB"
+enabled_large = "Syntax highlighting enabled for large file(s)"
+
+[tree]
+empty = "No workspace open."
+hint = "File → Open Workspace… (Cmd+Shift+O)"
+dialog_hint = "Enter — apply, Esc — cancel"
+new_file_title = "New file name:"
+new_folder_title = "New folder name:"
+rename_title = "Rename to:"
+name_placeholder = "name…"
+ctx_new_file = "New File…"
+ctx_new_folder = "New Folder…"
+ctx_rename = "Rename…"
+ctx_delete = "Delete"
+
+[shortcuts]
+title = "Keyboard Shortcuts"
+hint = "Esc — close"
+
+[shortcuts.section]
+file = "File"
+tabs = "Tabs"
+edit = "Edit"
+navigation = "Navigation"
+search = "Search"
+view = "View"
+
+[menu.help]
+name = "Help"
+shortcuts = "Keyboard Shortcuts"
+
+[shortcuts.action]
+open = "Open file"
+open_workspace = "Open workspace"
+save = "Save"
+save_as = "Save as"
+close_tab = "Close tab"
+new_tab = "New tab"
+next_tab = "Next tab"
+prev_tab = "Previous tab"
+undo = "Undo"
+redo = "Redo"
+go_to_line = "Go to line"
+add_cursor = "Add cursor at next match"
+toggle_bookmark = "Toggle bookmark"
+next_bookmark = "Next bookmark"
+prev_bookmark = "Previous bookmark"
+find = "Find in file"
+find_in_tabs = "Find in tabs"
+find_in_folder = "Find in folder"
+split_editor = "Split editor"
+close_pane = "Close pane"
+zoom_in = "Increase font size"
+zoom_out = "Decrease font size"
+zoom_reset = "Reset font size"
+shortcuts = "Keyboard shortcuts"
+interface_language = "Switch interface language"
+tree_new_file = "New file in workspace tree"
+tree_new_folder = "New folder in workspace tree"
+tree_rename = "Rename tree item"
+tree_delete = "Delete tree item"
+

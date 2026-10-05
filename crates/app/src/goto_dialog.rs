@@ -7,12 +7,11 @@
 use gpui::{Context, KeyDownEvent, Window, div, prelude::*, px, rgb};
 
 use crate::actions::GoToLine;
-use crate::theme::{CLOSE_HOVER, DIM, TABBAR, TEXT};
 use crate::workspace::Workspace;
 
 impl Workspace {
     pub(crate) fn on_go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.active().is_some() {
+        if self.model().active().is_some() {
             self.goto_input = Some(String::new());
             window.focus(&self.goto_focus);
             cx.notify();
@@ -38,10 +37,10 @@ impl Workspace {
             Some(crate::overlay_input::InputKey::Submit) => {
                 let target = self.goto_input.as_deref().unwrap_or("").trim().parse::<usize>().ok();
                 self.goto_input = None;
-                window.focus(&self.focus);
+                window.focus(&self.active_focus());
                 if let Some(no) = target {
                     let no = no.max(1);
-                    if let Some(tab) = self.model.active_mut() {
+                    if let Some(tab) = self.model_mut().active_mut() {
                         let line = (no - 1).min(tab.doc.len_lines().saturating_sub(1));
                         // Строка внутри свёрнутого тела → каретка на заголовок.
                         let line = tab.visible_line_or_header(line);
@@ -52,7 +51,7 @@ impl Workspace {
             }
             Some(crate::overlay_input::InputKey::Cancel) => {
                 self.goto_input = None;
-                window.focus(&self.focus);
+                window.focus(&self.active_focus());
             }
             _ => {}
         }
@@ -76,21 +75,21 @@ impl Workspace {
             .gap_2()
             .px_3()
             .py_2()
-            .bg(rgb(TABBAR))
+            .bg(rgb(crate::theme::current().tabbar))
             .border_1()
-            .border_color(rgb(CLOSE_HOVER))
+            .border_color(rgb(crate::theme::current().close_hover))
             .rounded_md()
             .text_size(px(12.0))
             .shadow_md()
             .track_focus(&self.goto_focus)
             .on_key_down(cx.listener(Self::handle_goto_key))
-            .child(div().text_color(rgb(DIM)).child("Go to line:"))
+            .child(div().text_color(rgb(crate::theme::current().dim)).child(crate::i18n::t(cx, "goto.label")))
             .child(
                 div()
                     .flex_1()
-                    .text_color(rgb(if input.is_empty() { DIM } else { TEXT }))
+                    .text_color(rgb(if input.is_empty() { crate::theme::current().dim } else { crate::theme::current().text }))
                     .child(if input.is_empty() {
-                        "line number…".to_string()
+                        crate::i18n::t(cx, "goto.placeholder")
                     } else {
                         input
                     }),

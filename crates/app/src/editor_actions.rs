@@ -1,8 +1,11 @@
 //! Обработчики действий (меню/горячие клавиши) и клавиатурный ввод
-//! редактора (группы 3–4): файлы (open/save/close), undo/redo,
-//! закладки, свёртывание, операции со строками, Cmd+D. Регистрация
-//! on_action — на корне (workspace.rs::render); типы действий —
-//! actions.rs; биндинги — main.rs.
+//! редактора (группы 3–4 + 8.1): файлы (open/save/close), split view,
+//! undo/redo, закладки, свёртывание, операции со строками, Cmd+D.
+//! Регистрация on_action — на корне (workspace.rs::render); типы
+//! действий — actions.rs; биндинги — main.rs.
+//!
+//! Все действия работают с АКТИВНОЙ панелью (`model_mut()`); клик по
+//! панели/вкладке активирует её (pane.rs).
 
 use std::path::PathBuf;
 
@@ -15,7 +18,7 @@ impl Workspace {
     // ---- Действия (минимальный набор группы 3; полный справочник — 8.5) ----
 
     /// Cmd+O: диалог ОС (gpui 0.2.2 `prompt_for_paths`; rfd не нужен —
-    /// D8.3), открытие каждого файла обычной вкладкой.
+    /// D8.3), открытие каждого файла обычной вкладкой в активную панель.
     pub(crate) fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -36,13 +39,18 @@ impl Workspace {
     /// Файлы сверх порога 20 МБ — вопрос пользователю о подсветке
     /// (D12.4): согласие включает её для любого размера.
     pub fn open_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let pi = self.active_pane;
         let mut first_error: Option<String> = None;
         let mut opened: Vec<usize> = Vec::new();
         for path in paths {
-            match self.model.open_path(path) {
+            match self.panes[pi].model.open_path(path) {
                 Ok(i) => opened.push(i),
                 Err(e) => {
-                    let msg = format!("Could not open {}: {e}", path.display());
+                    let msg = crate::i18n::tf(
+                        cx,
+                        "status.open_failed",
+                        &[("file", &path.display().to_string()), ("err", &e.to_string())],
+                    );
                     eprintln!("{msg}");
                     first_error.get_or_insert(msg);
                 }
@@ -56,19 +64,21 @@ impl Workspace {
             .iter()
             .copied()
             .filter(|&i| {
-                self.model
+                self.panes[pi]
+                    .model
                     .tab_mut(i)
                     .is_some_and(|t| t.language.over_threshold && !t.language.threshold_allowed)
             })
             .collect();
         if !over.is_empty() && !crate::bench::enabled() {
-            self.pending_threshold_tabs.extend(over);
+            self.pending_threshold_tabs
+                .extend(over.iter().map(|&i| (pi, i)));
             self.ask_pending_threshold(window, cx);
         }
         // Фоновая раскраска новых вкладок чекпоинтами (сразу, не
         // дожидаясь прыжков пользователя; workspace.rs).
         for i in &opened {
-            self.spawn_background_highlight(*i, cx);
+            self.spawn_background_highlight(pi, *i, cx);
         }
         cx.notify();
     }
@@ -76,28 +86,29 @@ impl Workspace {
     /// Cmd+S: сохранить активную вкладку; untitled → save-as диалог.
     pub(crate) fn on_save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
         let has_path = self
-            .model
+            .model()
             .active()
             .is_some_and(|t| t.path.is_some());
         if has_path {
             self.save_active(cx);
-        } else if self.model.active().is_some() {
+        } else if self.model().active().is_some() {
             self.save_as(cx);
         }
     }
 
     /// Cmd+Shift+S: сохранить как (в т.ч. первый Cmd+S для untitled).
     pub(crate) fn on_save_as(&mut self, _: &SaveFileAs, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.active().is_some() {
+        if self.model().active().is_some() {
             self.save_as(cx);
         }
     }
 
     /// Сохранение по существующему пути; ошибка — в статус-бар.
     fn save_active(&mut self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut()
+        if let Some(tab) = self.model_mut().active_mut()
             && let Err(e) = tab.save() {
-                self.status_message = Some(format!("Save failed: {e}"));
+                self.status_message =
+                    Some(crate::i18n::tf(cx, "status.save_failed", &[("err", &e.to_string())]));
             }
         cx.notify();
     }
@@ -105,7 +116,7 @@ impl Workspace {
     /// Диалог сохранения (gpui `prompt_for_new_path`, D8.3).
     fn save_as(&mut self, cx: &mut Context<Self>) {
         let dir = self
-            .model
+            .model()
             .active()
             .and_then(|t| t.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())))
             .or_else(dirs::home_dir)
@@ -114,9 +125,13 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |ws, cx| {
-                    if let Some(tab) = ws.model.active_mut()
+                    if let Some(tab) = ws.model_mut().active_mut()
                         && let Err(e) = tab.save_to(&path) {
-                            ws.status_message = Some(format!("Save failed: {e}"));
+                            ws.status_message = Some(crate::i18n::tf(
+                                cx,
+                                "status.save_failed",
+                                &[("err", &e.to_string())],
+                            ));
                         }
                     cx.notify();
                 })
@@ -129,32 +144,55 @@ impl Workspace {
     /// Cmd+W: закрыть вкладку; dirty — подтверждение через модальный
     /// gpui `Window::prompt` (Save / Don't Save / Cancel; D8.2).
     pub(crate) fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.model.active_index() {
-            self.close_tab_at(index, window, cx);
+        if let Some(index) = self.model().active_index() {
+            self.close_tab_in_pane(self.active_pane, index, window, cx);
         }
     }
 
-    pub(crate) fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self.model.tabs().get(index).is_some_and(|t| t.dirty);
+    /// Закрыть вкладку панели `pi` (8.1): dirty — диалог
+    /// Save / Don't Save / Cancel (D8.2); панель остаётся.
+    pub(crate) fn close_tab_in_pane(
+        &mut self,
+        pi: usize,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dirty = self
+            .panes
+            .get(pi)
+            .and_then(|p| p.model.tabs().get(index))
+            .is_some_and(|t| t.dirty);
         if !dirty {
-            self.model.close(index);
+            if let Some(pane) = self.panes.get_mut(pi) {
+                pane.model.close(index);
+            }
             cx.notify();
             return;
         }
-        let title = self.model.title(index).unwrap_or_else(|| "Untitled".into());
+        let title = self.panes[pi]
+            .model
+            .title(index)
+            .unwrap_or_else(|| "Untitled".into());
         let rx = window.prompt(
             PromptLevel::Warning,
-            &format!("Do you want to save the changes you made in \"{title}\"?"),
-            Some("Your changes will be lost if you don't save them."),
-            &["Save", "Don't Save", "Cancel"],
+            &crate::i18n::tf(cx, "dialog.dirty_title", &[("title", &title)]),
+            Some(&crate::i18n::t(cx, "dialog.dirty_message")),
+            &[
+                crate::i18n::t(cx, "dialog.save").as_str(),
+                crate::i18n::t(cx, "dialog.dont_save").as_str(),
+                crate::i18n::t(cx, "dialog.cancel").as_str(),
+            ],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
             let Ok(choice) = rx.await else { return };
             this.update_in(cx, |ws, _window, cx| match choice {
-                0 => ws.save_and_close(index, cx),
+                0 => ws.save_and_close(pi, index, cx),
                 1 => {
-                    ws.model.close(index);
+                    if let Some(pane) = ws.panes.get_mut(pi) {
+                        pane.model.close(index);
+                    }
                     cx.notify();
                 }
                 _ => {}
@@ -166,15 +204,26 @@ impl Workspace {
 
     /// Сохранить и закрыть; untitled — сначала save-as (отмена диалога
     /// оставляет вкладку открытой).
-    fn save_and_close(&mut self, index: usize, cx: &mut Context<Self>) {
-        let has_path = self.model.tabs().get(index).is_some_and(|t| t.path.is_some());
+    fn save_and_close(&mut self, pi: usize, index: usize, cx: &mut Context<Self>) {
+        let has_path = self
+            .panes
+            .get(pi)
+            .and_then(|p| p.model.tabs().get(index))
+            .is_some_and(|t| t.path.is_some());
         if !has_path {
-            self.save_as_then_close(index, cx);
+            self.save_as_then_close(pi, index, cx);
             return;
         }
-        match self.model.tab_mut(index).map(|t| t.save()) {
+        match self
+            .panes
+            .get_mut(pi)
+            .and_then(|p| p.model.tab_mut(index))
+            .map(|t| t.save())
+        {
             Some(Ok(())) => {
-                self.model.close(index);
+                if let Some(pane) = self.panes.get_mut(pi) {
+                    pane.model.close(index);
+                }
                 cx.notify();
             }
             Some(Err(e)) => self.status_message = Some(format!("Save failed: {e}")),
@@ -182,11 +231,11 @@ impl Workspace {
         }
     }
 
-    fn save_as_then_close(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn save_as_then_close(&mut self, pi: usize, index: usize, cx: &mut Context<Self>) {
         let dir = self
-            .model
-            .tabs()
-            .get(index)
+            .panes
+            .get(pi)
+            .and_then(|p| p.model.tabs().get(index))
             .and_then(|t| t.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())))
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -195,11 +244,14 @@ impl Workspace {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |ws, cx| {
                     let saved = ws
-                        .model
-                        .tab_mut(index)
+                        .panes
+                        .get_mut(pi)
+                        .and_then(|p| p.model.tab_mut(index))
                         .is_some_and(|t| t.save_to(&path).is_ok());
-                    if saved {
-                        ws.model.close(index);
+                    if saved
+                        && let Some(pane) = ws.panes.get_mut(pi)
+                    {
+                        pane.model.close(index);
                     }
                     cx.notify();
                 })
@@ -207,6 +259,143 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    // ---- Темы (8.2/D15.2) ----
+
+    /// Меню View → Theme: системная / тёмная / светлая. Выбор
+    /// применяется немедленно (перерисовка) и сохраняется в сессии.
+    pub(crate) fn on_theme_system(
+        &mut self,
+        _: &ThemeSystem,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_kind(crate::theme::ThemeKind::System, cx);
+    }
+
+    pub(crate) fn on_theme_dark(
+        &mut self,
+        _: &ThemeDark,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_kind(crate::theme::ThemeKind::Dark, cx);
+    }
+
+    pub(crate) fn on_theme_light(
+        &mut self,
+        _: &ThemeLight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme_kind(crate::theme::ThemeKind::Light, cx);
+    }
+
+    fn set_theme_kind(&mut self, kind: crate::theme::ThemeKind, cx: &mut Context<Self>) {
+        self.theme_kind = kind;
+        // Немедленное применение: render разрулит по appearance, но
+        // выставляем и здесь (панели читают current() в кадре).
+        cx.notify();
+    }
+
+    // ---- Вкладки (8.5/D15.5): Cmd+T / Cmd+Shift+[ ] в активной панели ----
+
+    /// Cmd+T: новая untitled-вкладка в активной панели.
+    pub(crate) fn on_new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.model_mut().new_untitled();
+        cx.notify();
+    }
+
+    /// Cmd+Shift+]: следующая вкладка активной панели (по кругу).
+    pub(crate) fn on_next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, cx);
+    }
+
+    /// Cmd+Shift+[: предыдущая вкладка (по кругу).
+    pub(crate) fn on_prev_tab(&mut self, _: &PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, cx);
+    }
+
+    fn cycle_tab(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let pi = self.active_pane;
+        let Some(model) = self.panes.get_mut(pi).map(|p| &mut p.model) else { return };
+        let len = model.len();
+        if len == 0 {
+            return;
+        }
+        let cur = model.active_index().unwrap_or(0) as isize;
+        let next = (cur + dir).rem_euclid(len as isize) as usize;
+        model.activate(next);
+        cx.notify();
+    }
+
+    // ---- Справочник сочетаний (8.5) ----
+
+    /// Cmd+/ или Help-меню: открыть/закрыть оверлей-справочник.
+    pub(crate) fn on_show_shortcuts(
+        &mut self,
+        _: &ShowShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcuts_open = !self.shortcuts_open;
+        if self.shortcuts_open {
+            let f = self.shortcuts_focus.clone();
+            window.focus(&f);
+        } else {
+            let f = self.active_focus();
+            window.focus(&f);
+        }
+        cx.notify();
+    }
+
+    /// Cmd+Shift+L: следующий язык интерфейса по кругу (8.5).
+    pub(crate) fn on_cycle_language(
+        &mut self,
+        _: &CycleLanguage,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let langs = crate::i18n::available(cx);
+        let cur = self.ui_language.clone();
+        let next = langs
+            .iter()
+            .position(|l| *l == cur)
+            .map(|i| langs[(i + 1) % langs.len()].clone())
+            .unwrap_or_else(|| langs.first().cloned().unwrap_or_else(|| "en".to_string()));
+        crate::i18n::set_language(cx, &next);
+        self.ui_language = next;
+        cx.notify();
+    }
+
+    // ---- Split view (8.1/D15.1) ----
+
+    /// Cmd+\: разделить редактор — новая панель (до MAX_PANES),
+    /// активируется; файлы открываются в фокусированную панель.
+    pub(crate) fn on_split_editor(
+        &mut self,
+        _: &SplitEditor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_pane(window, cx);
+    }
+
+    /// Cmd+Shift+\: закрыть активную панель (dirty-вкладки — диалоги;
+    /// pane.rs), последняя панель не закрывается.
+    pub(crate) fn on_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_active_pane(window, cx);
+    }
+
+    /// Меню View: синхронная прокрутка панелей (8.1).
+    pub(crate) fn on_toggle_sync_scroll(
+        &mut self,
+        _: &ToggleSyncScroll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_sync_scroll(cx);
     }
 
     pub(crate) fn on_undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
@@ -220,8 +409,12 @@ impl Workspace {
     // ---- Клавиатурный ввод редактора (plain-клавиши; Cmd/Ctrl —
     // действия выше; список клавиш — D9.2/D9.3) ----
 
-    pub(crate) fn handle_key(
+    /// Ввод в ФОКУСИРОВАННУЮ панель (8.1): listener редактора панели
+    /// вызывает с её индексом; панель становится активной (паттерн
+    /// VS Code — ввод переключает активную группу).
+    pub(crate) fn handle_key_pane(
         &mut self,
+        pi: usize,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -233,9 +426,12 @@ impl Workspace {
         if ks.modifiers.platform || ks.modifiers.control || ks.modifiers.alt {
             return;
         }
+        if pi != self.active_pane {
+            self.activate_pane(pi, cx);
+        }
         let extend = ks.modifiers.shift;
         let page = self.page_lines(window);
-        let Some(tab) = self.model.active_mut() else { return };
+        let Some(tab) = self.panes.get_mut(pi).and_then(|p| p.model.active_mut()) else { return };
         match ks.key.as_str() {
             "backspace" => tab.backspace(),
             "delete" => tab.delete_forward(),
@@ -273,7 +469,7 @@ impl Workspace {
 
     /// F2: следующая закладка по кругу (+ скролл к ней).
     pub(crate) fn on_next_bookmark(&mut self, _: &NextBookmark, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut()
+        if let Some(tab) = self.model_mut().active_mut()
             && tab.goto_next_bookmark() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);
@@ -283,7 +479,7 @@ impl Workspace {
 
     /// Shift+F2: предыдущая закладка по кругу (+ скролл).
     pub(crate) fn on_prev_bookmark(&mut self, _: &PrevBookmark, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut()
+        if let Some(tab) = self.model_mut().active_mut()
             && tab.goto_prev_bookmark() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);
@@ -298,7 +494,7 @@ impl Workspace {
 
     /// Клик по записи в панели закладок: каретка на строку + скролл.
     pub(crate) fn goto_bookmark(&mut self, line: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
+        if let Some(tab) = self.model_mut().active_mut() {
             tab.set_caret_at(line, 0);
         }
         self.scroll_to_line(line);
@@ -390,7 +586,7 @@ impl Workspace {
     /// Следующий курсор на совпадение слова; скроллим к новому
     /// главному курсору.
     pub(crate) fn on_add_next_match(&mut self, _: &AddNextMatch, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut()
+        if let Some(tab) = self.model_mut().active_mut()
             && tab.add_next_word_match() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);

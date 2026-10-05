@@ -40,25 +40,26 @@ impl Workspace {
             Err(e) => {
                 sp.scanning = false;
                 sp.error = Some(e.clone());
-                self.status_message = Some(format!("Invalid search pattern: {e}"));
+                self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]));
                 cx.notify();
                 return;
             }
         };
         sp.scanning = true;
-        // Данные вкладок для фонового потока (вкладки остаются в модели).
-        let tabs: Vec<(usize, String, editor_core::ropey::Rope)> = (0..self.model.len())
-            .filter_map(|ix| {
-                let label = self.model.title(ix).unwrap_or_default();
-                let tab = self.model.tab_mut(ix)?;
-                Some((ix, label, tab.doc.rope().clone()))
+        // Данные вкладок ВСЕХ панелей для фонового потока (вкладки
+        // остаются в моделях; 8.1 — панели независимы).
+        let tabs: Vec<(usize, usize, String, editor_core::ropey::Rope)> = self
+            .all_tabs()
+            .map(|(pi, ix, tab)| {
+                let label = self.panes[pi].model.title(ix).unwrap_or_default();
+                (pi, ix, label, tab.doc.rope().clone())
             })
             .collect();
         let tab_count = tabs.len();
         let search = cx.background_executor().spawn(async move {
             let mut results: Vec<SearchHit> = Vec::new();
             let mut truncated = false;
-            'tabs: for (ix, label, rope) in tabs {
+            'tabs: for (pi, ix, label, rope) in tabs {
                 for (per_tab, (s, e)) in matcher.find_in_rope(&rope).into_iter().enumerate() {
                     if results.len() >= MAX_HITS_TOTAL {
                         truncated = true;
@@ -76,7 +77,7 @@ impl Workspace {
                     let (fragment, frag_col, frag_len) =
                         fragment_from_content(&content, col, len);
                     results.push(SearchHit {
-                        owner: SearchOwner::Tab { index: ix, label: label.clone() },
+                        owner: SearchOwner::Tab { pane: pi, index: ix, label: label.clone() },
                         line,
                         col,
                         len,
@@ -94,11 +95,12 @@ impl Workspace {
                 let Some(sp) = ws.search.as_mut() else { return };
                 sp.scanning = false;
                 sp.truncated = truncated;
-                // tabs search: владельцы — только вкладки.
+                // tabs search: владельцы — только вкладки (панель+индекс
+                // — уникальная пара, 8.1).
                 let files = results
                     .iter()
                     .map(|h| match &h.owner {
-                        SearchOwner::Tab { index, .. } => *index,
+                        SearchOwner::Tab { pane, index, .. } => (pane * 1_000_000) + *index,
                         SearchOwner::Path { path, .. } => path_hash(path),
                     })
                     .collect::<std::collections::BTreeSet<_>>()
@@ -156,7 +158,7 @@ impl Workspace {
             Some(Ok(m)) => m,
             Some(Err(e)) => {
                 sp.error = Some(e.clone());
-                self.status_message = Some(format!("Invalid search pattern: {e}"));
+                self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]));
                 cx.notify();
                 return;
             }
@@ -164,12 +166,12 @@ impl Workspace {
         let mask = sp.mask.clone();
         sp.scanning = true;
 
-        // 1. Открытые вкладки в папке — по вкладочному содержимому.
+        // 1. Открытые вкладки (ВСЕХ панелей) в папке — по вкладочному
+        // содержимому.
         let mut results = Vec::new();
         let mut open_paths: Vec<PathBuf> = Vec::new();
-        for ix in 0..self.model.len() {
-            let label = self.model.title(ix).unwrap_or_default();
-            let Some(tab) = self.model.tab_mut(ix) else { continue };
+        for (pi, ix, tab) in self.all_tabs() {
+            let label = self.panes[pi].model.title(ix).unwrap_or_default();
             let Some(path) = tab.path.clone() else { continue };
             if !path.starts_with(&folder) {
                 continue;
@@ -182,7 +184,7 @@ impl Workspace {
                 let (fragment, frag_col, frag_len) =
                     fragment_from_content(&content, s - ls, e - s);
                 results.push(SearchHit {
-                    owner: SearchOwner::Tab { index: ix, label: label.clone() },
+                    owner: SearchOwner::Tab { pane: pi, index: ix, label: label.clone() },
                     line,
                     col: s - ls,
                     len: e - s,
@@ -248,7 +250,7 @@ impl Workspace {
                 }
                 if let Some(summary) = done {
                     this.update(cx, |ws, cx| {
-                        ws.finish_folder_scan(summary);
+                        ws.finish_folder_scan(summary, cx);
                         cx.notify();
                     })
                     .ok();
@@ -288,9 +290,10 @@ impl Workspace {
             }
         }
         sp.results.sort_by(|a, b| match (&a.owner, &b.owner) {
-            (SearchOwner::Tab { index: i1, .. }, SearchOwner::Tab { index: i2, .. }) => {
-                i1.cmp(i2).then(a.line.cmp(&b.line))
-            }
+            (
+                SearchOwner::Tab { pane: p1, index: i1, .. },
+                SearchOwner::Tab { pane: p2, index: i2, .. },
+            ) => p1.cmp(p2).then(i1.cmp(i2)).then(a.line.cmp(&b.line)),
             (SearchOwner::Tab { .. }, SearchOwner::Path { .. }) => std::cmp::Ordering::Less,
             (SearchOwner::Path { .. }, SearchOwner::Tab { .. }) => std::cmp::Ordering::Greater,
             (
@@ -301,16 +304,20 @@ impl Workspace {
     }
 
     /// Завершение скана: итог + сообщение статус-бара.
-    pub(crate) fn finish_folder_scan(&mut self, summary: ScanSummary) {
+    pub(crate) fn finish_folder_scan(&mut self, summary: ScanSummary, cx: &gpui::App) {
         let Some(sp) = self.search.as_mut() else { return };
         sp.scanning = false;
         sp.summary = Some(summary);
         // Открытые вкладки могли дать совпадения вне summary —
         // берём фактическое число результатов.
         let hits = sp.results.len();
-        self.status_message = Some(format!(
-            "Search: {hits} match(es) in {} file(s)",
-            summary.files_with_hits
+        self.status_message = Some(crate::i18n::tf(
+            cx,
+            "search.status_summary",
+            &[
+                ("hits", &hits.to_string()),
+                ("files", &summary.files_with_hits.to_string()),
+            ],
         ));
     }
 
@@ -344,10 +351,10 @@ impl Workspace {
             .results
             .iter()
             .filter_map(|h| match &h.owner {
-                SearchOwner::Tab { index, .. } => self
-                    .model
-                    .tabs()
-                    .get(*index)
+                SearchOwner::Tab { pane, index, .. } => self
+                    .panes
+                    .get(*pane)
+                    .and_then(|p| p.model.tabs().get(*index))
                     .and_then(|t| t.path.clone()),
                 SearchOwner::Path { .. } => None,
             })
@@ -364,9 +371,9 @@ impl Workspace {
         let count = all.len();
         let rx = window.prompt(
             PromptLevel::Info,
-            &format!("Replace all matches in {count} file(s)?"),
-            Some("Files are opened as modified tabs; nothing is written to disk until you save."),
-            &["Replace", "Cancel"],
+            &crate::i18n::tf(cx, "dialog.replace_in_files_title", &[("n", &count.to_string())]),
+            Some(&crate::i18n::t(cx, "dialog.replace_in_files_note")),
+            &[crate::i18n::t(cx, "dialog.replace").as_str(), crate::i18n::t(cx, "dialog.cancel").as_str()],
             cx,
         );
         let paths = all;
@@ -394,9 +401,9 @@ impl Workspace {
         let mut files_changed = 0usize;
         let mut first_error: Option<String> = None;
         for path in paths {
-            match self.model.open_path(path) {
+            match self.model_mut().open_path(path) {
                 Ok(ix) => {
-                    let Some(tab) = self.model.tab_mut(ix) else { continue };
+                    let Some(tab) = self.model_mut().tab_mut(ix) else { continue };
                     let edits = match matcher.replacements_in_doc(&tab.doc, &replacement) {
                         Ok(e) => e,
                         Err(_) => continue,
@@ -408,15 +415,22 @@ impl Workspace {
                     }
                 }
                 Err(e) => {
-                    first_error
-                        .get_or_insert(format!("Could not open {}: {e}", path.display()));
+                    first_error.get_or_insert(crate::i18n::tf(
+                        cx,
+                        "status.open_failed",
+                        &[("file", &path.display().to_string()), ("err", &e.to_string())],
+                    ));
                 }
             }
         }
         self.status_message = Some(if total == 0 {
-            "No matches to replace (files may have changed)".to_string()
+            crate::i18n::t(cx, "search.no_matches_to_replace")
         } else {
-            format!("Replaced {total} occurrence(s) in {files_changed} file(s) — not saved to disk")
+            crate::i18n::tf(
+                cx,
+                "search.replaced_files",
+                &[("n", &total.to_string()), ("m", &files_changed.to_string())],
+            )
         });
         if let Some(e) = first_error {
             self.status_message = Some(e);

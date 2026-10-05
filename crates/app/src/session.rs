@@ -32,6 +32,22 @@ pub struct SessionState {
     /// Геометрия окна.
     #[serde(default)]
     pub window: Option<WindowGeometry>,
+    /// Выбор темы (8.2): "system"/"dark"/"light".
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Шрифт редактора (8.3): семейство + размер.
+    #[serde(default)]
+    pub font: Option<FontSettings>,
+    /// Язык интерфейса (8.4): код файла переводов ("en", "ru", …).
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+/// Настройка шрифта редактора (8.3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontSettings {
+    pub family: String,
+    pub size: f32,
 }
 
 /// Вкладка сессии: путь файла.
@@ -152,6 +168,12 @@ mod tests {
             ],
             active_tab: Some(1),
             window: Some(WindowGeometry { x: 10.5, y: 20.0, width: 1024.0, height: 768.0 }),
+            theme: Some("dark".to_string()),
+            font: Some(FontSettings {
+                family: "Menlo".to_string(),
+                size: 14.0,
+            }),
+            language: Some("en".to_string()),
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: SessionState = serde_json::from_str(&json).unwrap();
@@ -182,6 +204,9 @@ mod tests {
             tabs: vec![SessionTab { path: dir.write("note.txt", "content\n") }],
             active_tab: Some(0),
             window: Some(WindowGeometry { x: 0.0, y: 0.0, width: 800.0, height: 600.0 }),
+            theme: None,
+            font: None,
+            language: None,
         };
         save_session(&state, &target).unwrap();
         assert!(target.exists());

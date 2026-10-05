@@ -6,7 +6,6 @@
 use gpui::{Context, div, prelude::*, px, rgb};
 
 use crate::geometry::PANEL_W;
-use crate::theme::{ACCENT, CLOSE_HOVER, PANEL, PANEL_HEADER, TAB_INACTIVE, TEXT};
 use crate::workspace::Workspace;
 
 impl Workspace {
@@ -19,7 +18,7 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         // Закладки активного файла (4.4/D9.4).
         let bookmarks = self
-            .model
+            .model()
             .active()
             .map(|t| {
                 t.bookmarked_lines()
@@ -46,22 +45,22 @@ impl Workspace {
                     .px_3()
                     .py_2()
                     .text_size(px(11.0))
-                    .text_color(rgb(PANEL_HEADER))
-                    .child("EXPLORER"),
+                    .text_color(rgb(crate::theme::current().panel_header))
+                    .child(crate::i18n::t(cx, "panel.explorer")),
             )
             .child(tree_section.flex_shrink_0());
         if !bookmarks.is_empty() {
             let mut section = div()
                 .mt_2()
                 .border_t_1()
-                .border_color(rgb(CLOSE_HOVER))
+                .border_color(rgb(crate::theme::current().close_hover))
                 .child(
                     div()
                         .px_3()
                         .py_2()
                         .text_size(px(11.0))
-                        .text_color(rgb(PANEL_HEADER))
-                        .child(format!("BOOKMARKS ({})", bookmarks.len())),
+                        .text_color(rgb(crate::theme::current().panel_header))
+                        .child(crate::i18n::tf(cx, "panel.bookmarks", &[("n", &bookmarks.len().to_string())])),
                 );
             for (line, content) in bookmarks {
                 section = section.child(
@@ -75,11 +74,11 @@ impl Workspace {
                         .px_3()
                         .py_1()
                         .text_size(px(11.0))
-                        .text_color(rgb(TEXT))
-                        .hover(|d| d.bg(rgb(CLOSE_HOVER)))
+                        .text_color(rgb(crate::theme::current().text))
+                        .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
                         .child(
                             div()
-                                .text_color(rgb(ACCENT))
+                                .text_color(rgb(crate::theme::current().accent))
                                 .flex_shrink_0()
                                 .child(format!("{}", line + 1)),
                         )
@@ -88,7 +87,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .text_ellipsis()
-                                .text_color(rgb(TAB_INACTIVE))
+                                .text_color(rgb(crate::theme::current().tab_inactive))
                                 .child(if content.is_empty() { " ".to_string() } else { content }),
                         ),
                 );
@@ -110,7 +109,7 @@ impl Workspace {
             .relative()
             .w(px(PANEL_W))
             .flex_shrink_0()
-            .bg(rgb(PANEL))
+            .bg(rgb(crate::theme::current().panel))
             .flex()
             .flex_col()
             .on_mouse_move(cx.listener(
