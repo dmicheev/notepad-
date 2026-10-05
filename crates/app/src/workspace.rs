@@ -64,6 +64,11 @@ pub struct Workspace {
     /// handle (паттерн goto_dialog).
     pub language_input: Option<String>,
     pub(crate) language_focus: FocusHandle,
+    /// Панель поиска/замены (6.1–6.5, D13): состояние + результаты;
+    /// фокус — отдельный handle (ловушка D9.2 — клавиши панели не
+    /// доходят до handle_key редактора).
+    pub search: Option<crate::search_panel::SearchPanel>,
+    pub(crate) search_focus: FocusHandle,
     /// Прогрев syntect запланирован (однократно; после первого кадра —
     /// инициализация набора вне критического пути, D12.1).
     pub(crate) syntax_warmup_scheduled: bool,
@@ -74,6 +79,30 @@ pub struct Workspace {
     /// Кэш мапы видимых строк (folding, D9.5/D11.2): индекс вкладки +
     /// состояние (`FoldView`). Пересчёт — по правилам `FoldView`.
     pub(crate) fold_view: Option<(usize, FoldView)>,
+    /// Дерево воркспейса (группа 7): None — воркспейс не открыт.
+    pub tree: Option<crate::fs_tree::FsTree>,
+    /// Overlay-диалог ввода имени дерева (7.2): NewFile/NewFolder/
+    /// Rename; фокус — отдельный handle (паттерн goto-диалога).
+    pub tree_dialog: Option<crate::tree_panel::TreeDialog>,
+    pub(crate) tree_focus: FocusHandle,
+    /// Контекстное меню дерева (7.2): узел + позиция правого клика.
+    pub(crate) context_menu: Option<crate::tree_panel::TreeContextMenu>,
+    /// Папка под курсором при drag-and-drop дерева (подсветка).
+    pub(crate) drop_target: Option<std::path::PathBuf>,
+    /// Наблюдатель FS воркспейса (7.3) + поколение (замена воркспейса
+    /// останавливает поллинг старого поколения).
+    pub(crate) fs_watch: Option<crate::fs_watch::FsWatch>,
+    pub(crate) watch_generation: u64,
+    /// Полосы прокрутки (scrollbar.rs): handle левой панели, оверлея
+    /// языка и таб-бара (редактор — `scroll` выше); активный драг
+    /// ползунка (move/up слушают контейнеры зон).
+    pub(crate) panel_scroll: gpui::ScrollHandle,
+    pub(crate) language_scroll: gpui::ScrollHandle,
+    pub(crate) tab_scroll: gpui::ScrollHandle,
+    pub(crate) thumb_drag: Option<crate::scrollbar::ThumbDrag>,
+    /// Горизонтальный скролл редактора (внешняя зона вокруг
+    /// uniform_list, editor_view.rs; вертикаль — в `scroll`).
+    pub(crate) h_scroll: gpui::ScrollHandle,
 }
 
 impl Workspace {
@@ -91,9 +120,23 @@ impl Workspace {
             goto_focus: cx.focus_handle(),
             language_input: None,
             language_focus: cx.focus_handle(),
+            search: None,
+            search_focus: cx.focus_handle(),
             syntax_warmup_scheduled: false,
             pending_threshold_tabs: Vec::new(),
             fold_view: None,
+            tree: None,
+            tree_dialog: None,
+            tree_focus: cx.focus_handle(),
+            context_menu: None,
+            drop_target: None,
+            fs_watch: None,
+            watch_generation: 0,
+            panel_scroll: gpui::ScrollHandle::new(),
+            language_scroll: gpui::ScrollHandle::new(),
+            tab_scroll: gpui::ScrollHandle::new(),
+            thumb_drag: None,
+            h_scroll: gpui::ScrollHandle::new(),
         }
     }
 
@@ -102,7 +145,7 @@ impl Workspace {
     /// (ленивые контексты/regex'ы синтаксиса — вне рендера). Вызывается
     /// отложенно после первого кадра — холодный старт и открытие файлов
     /// syntect не платят.
-    pub fn refresh_all_languages(&mut self) {
+    pub fn refresh_all_languages(&mut self, cx: &mut Context<Self>) {
         for i in 0..self.model.len() {
             if let Some(tab) = self.model.tab_mut(i) {
                 tab.refresh_language();
@@ -110,25 +153,123 @@ impl Workspace {
         }
         // Прогреть грамматику активной вкладки (ленивая десериализация
         // контекстов + компиляция regex'ов — разовая цена, D12.1).
-        if let Some(tab) = self.model.active_mut() {
-            if tab.highlight.syntax_name().is_some() {
+        if let Some(tab) = self.model.active_mut()
+            && tab.highlight.syntax_name().is_some() {
                 let lines = tab.doc.len_lines();
                 tab.highlight.ensure_window(&tab.doc, 0, lines.min(64));
             }
+        // Фоновый проход чекпоинтами — сразу, не ждать пользовательских
+        // прыжков (большой файл красится сам, прыжок вглубь дёшев).
+        for i in 0..self.model.len() {
+            self.spawn_background_highlight(i, cx);
         }
+    }
+
+    /// Фоновая раскраска файла чекпоинтами (BackgroundWalk) — ходка
+    /// ВЕСЬ файл сразу после открытия, не дожидаясь пользовательских
+    /// прыжков: после неё любой прыжок = ≤ CHECKPOINT_EVERY строк
+    /// кадрового догонa. Тактики: syntect/onig-состояния НЕ Send —
+    /// фоновой поток невозможен; ходка идёт НА ГЛАВНОМ потоке таймером
+    /// (тик 25 мс, бюджет 5 мс — между кадрами, UI не рвётся). Правка
+    /// НИЖЕ курсора ходки безвредна (rope актуален, стек границы
+    /// валиден); правка ВЫШЕ (bg_valid_upto < line) — ходка
+    /// перезапускается от дальнего валидного чекпоинта движка после
+    /// паузы (1 с тишины). Смена языка/закрытие вкладки — стоп.
+    /// Мелкие файлы (≤ 2 чекпоинтов) не ходим — кадровый
+    /// ensure_window дешевле.
+    pub(crate) fn spawn_background_highlight(&mut self, ix: usize, cx: &mut Context<Self>) {
+        /// Тик ходки (главный поток, между кадрами).
+        const TICK: std::time::Duration = std::time::Duration::from_millis(25);
+        /// CPU-бюджет порции на тик — больше кадра не занимать.
+        const TICK_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
+        /// Пауза перед перезапуском ходки после правок (тишина ввода).
+        const RESTART_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+        let Some(tab) = self.model.tab_mut(ix) else { return };
+        if tab.bg_walk_started {
+            return;
+        }
+        // Нет синтаксиса (ещё не прогрет/детект отложен) или CSV —
+        // ходки нет; ФЛАГ не ставим: язык появится (прогрев/детект/
+        // allow-порог) — следующая точка входа запустит ходку.
+        // (Ловушка первой итерации: open_paths зовёт раньше детекта.)
+        if editor_core::highlight::BackgroundWalk::start(&tab.highlight).is_none() {
+            return;
+        }
+        // Мелкий файл — кадровый ensure_window дешевле ходки; флаг не
+        // ставим (файл может вырасти правками — периодический rescan
+        // не завели, редкая ситуация).
+        if tab.doc.len_lines() <= editor_core::highlight::CHECKPOINT_EVERY * 2 {
+            return;
+        }
+        tab.bg_walk_started = true;
+        tab.bg_valid_upto = usize::MAX;
+        let expected_syntax = tab.highlight.syntax_name().map(str::to_string);
+        cx.spawn(async move |this, cx| {
+            // Ходка создаётся/пересоздаётся от прогресса движка.
+            let mut walk: Option<editor_core::highlight::BackgroundWalk> = None;
+            loop {
+                cx.background_executor().timer(TICK).await;
+                // Что делать дальше — решает замыкание на модели
+                /// (правки/язык/закрытие видны только там).
+                enum Step {
+                    Run { done: bool },
+                    Dead,
+                }
+                let step = this
+                    .update(cx, |ws: &mut Self, cx| {
+                    let Some(tab) = ws.model.tab_mut(ix) else {
+                        return Step::Dead; // вкладка закрыта
+                    };
+                    if expected_syntax.as_deref() != tab.highlight.syntax_name() {
+                        return Step::Dead; // язык сменён
+                    }
+                    // Правка выше курсора — стейт ходки мусор: сброс и
+                    // рестарт от дальнего ВАЛИДНОГО чекпоинта движка
+                    // (invalidate_from уже выкинул старые).
+                    if walk.as_ref().is_some_and(|w| tab.bg_valid_upto < w.line()) {
+                        walk = None;
+                    }
+                    if walk.is_none() {
+                        walk = editor_core::highlight::BackgroundWalk::start(&tab.highlight);
+                        if walk.is_some() {
+                            tab.bg_valid_upto = usize::MAX; // новая эпоха
+                        } else {
+                            return Step::Dead;
+                        }
+                    }
+                    let chunk = walk.as_mut().unwrap().chunk(&tab.doc, TICK_BUDGET);
+                    let done = chunk.done;
+                    let valid = tab.bg_valid_upto;
+                    tab.highlight.merge_background(chunk, valid);
+                    // Порция могла закрыть ВИДИМЫЕ строки — кадр.
+                    cx.notify();
+                    Step::Run { done }
+                })
+                .unwrap_or(Step::Dead);
+                match step {
+                    Step::Dead => return,
+                    Step::Run { done: true } => return,
+                    Step::Run { done: false } => {} // идём тиками дальше
+                }
+                let _ = RESTART_PAUSE; // рестарт ленивый: walk=None
+                                       // пересоздаётся следующим тиком.
+            }
+        })
+        .detach();
     }
 
     /// Транзиентное сообщение при открытии файла сверх порога (5.3):
     /// подсветка отключена, редактирование доступно. Вызывается из
     /// точек открытия (диалог, сессия, NOTEPAD_OPEN).
+    #[allow(dead_code)] // уведомление порога живёт в ask_pending_threshold (D12.4);
+                        // метод оставлен как API точек открытия (паттерн D10.4)
     pub(crate) fn note_highlight_threshold(&mut self) {
-        if let Some(tab) = self.model.active() {
-            if tab.language.disabled() {
+        if let Some(tab) = self.model.active()
+            && tab.language.disabled() {
                 self.status_message = Some(
                     "Syntax highlighting is off: file exceeds 20 MB".to_string(),
                 );
             }
-        }
     }
 
     /// Поставить вкладки сверх порога в очередь на вопрос (D12.4):
@@ -187,6 +328,9 @@ impl Workspace {
                         for i in indices {
                             if let Some(tab) = ws.model.tab_mut(i) {
                                 tab.allow_highlight_despite_threshold();
+                                // Язык включён — фоновая ходка чекпоинтами
+                                // (пропущенная на открытии: синтаксиса не было).
+                                ws.spawn_background_highlight(i, cx);
                             }
                         }
                         ws.status_message = Some(
@@ -204,6 +348,20 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Применить операцию к активной вкладке (вкладок нет — no-op) и
+    /// перерисовать. Схлопывает повтор `if let Some(tab) = ...;
+    /// cx.notify()` обработчиков действий (editor_actions.rs).
+    pub(crate) fn with_active_tab(
+        &mut self,
+        op: impl FnOnce(&mut crate::buffer_tab::BufferTab),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.model.active_mut() {
+            op(tab);
+        }
+        cx.notify();
     }
 
     /// Пересчитать мапу видимых строк, если устарела. Вызывается перед
@@ -280,6 +438,45 @@ impl Workspace {
         self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
     }
 
+    /// Немедленная прокрутка к real-строке с центрированием (переходы
+    /// поиска 6.1–6.4): ловушка deferred-скролла D12.5 —
+    /// `scroll_to_item` применяется в prepaint ПОСЛЕ render, кадр после
+    /// клика по ‹/› строится по СТАРОМУ offset и в живом окне «догонял»
+    /// только следующим событием. Ставим целевой offset в общий Rc
+    /// (тот же, что читает render) НЕМЕДЛЕННО + `scroll_to_item` тем же
+    /// индексом — deferred подтвердит значение (паттерн клика по
+    /// липкой шапке D12.5).
+    pub(crate) fn scroll_to_line_now(&mut self, line: usize) {
+        self.ensure_fold_view();
+        let line = self
+            .model
+            .active()
+            .map(|t| t.visible_line_or_header(line))
+            .unwrap_or(line);
+        let vis = self.real_to_visible(line);
+        let viewport_h = self
+            .editor_bounds()
+            .map(|b| f32::from(b.size.height))
+            .unwrap_or(0.0);
+        if viewport_h <= 0.0 {
+            // Редактор ещё не отрисован — только deferred-путь.
+            self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
+            return;
+        }
+        let content_h = self.visible_len() as f32 * crate::geometry::LINE_HEIGHT;
+        // Центр вьюпорта на середине строки (семантика Center).
+        let target = vis as f32 * crate::geometry::LINE_HEIGHT
+            + crate::geometry::LINE_HEIGHT / 2.0
+            - viewport_h / 2.0;
+        let y = target.clamp(0.0, (content_h - viewport_h).max(0.0));
+        self.scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-y)));
+        self.scroll.scroll_to_item(vis, gpui::ScrollStrategy::Center);
+    }
+
     /// real-строка → индекс uniform_list (видимый); скрытая строка —
     /// её заголовок. Тождественная мапа: clamp в последнюю строку
     /// (как fallback материальной).
@@ -318,7 +515,8 @@ impl Workspace {
             tabs.push(session::SessionTab { path: path.clone() });
         }
         SessionState {
-            workspace: None, // воркспейс — группа 7
+            // Воркспейс (7.4): путь последнего открытого дерева.
+            workspace: self.tree.as_ref().map(|t| t.root().to_path_buf()),
             tabs,
             active_tab,
             window: geometry,
@@ -378,7 +576,7 @@ impl Render for Workspace {
                     .timer(std::time::Duration::from_millis(50))
                     .await;
                 this.update(cx, |ws, cx| {
-                    ws.refresh_all_languages();
+                    ws.refresh_all_languages(cx);
                     cx.notify();
                 })
                 .ok();
@@ -422,6 +620,9 @@ impl Render for Workspace {
                     .base_handle
                     .set_offset(point(px(0.0), px(y)));
             }
+            // Горизонтальный скролл не свапится по вкладкам (MVP):
+            // сброс — входящая вкладка начинает от левого края.
+            self.h_scroll.set_offset(point(px(0.0), px(0.0)));
             self.scroll_owner = active_ix;
         }
 
@@ -441,10 +642,12 @@ impl Render for Workspace {
                     .items_center()
                     .flex_shrink_0()
                     .bg(rgb(TABBAR))
-                    .child(self.render_tab_bar(cx).flex_1().min_w_0())
+                    // Обёртка таб-бара несёт flex_1/min_w_0 (полоса —
+                    // оверлей внутри, tab_bar.rs).
+                    .child(self.render_tab_bar(cx))
                     .child(reorder_buttons),
             )
-            .child(self.render_editor(cx));
+                    .child(self.render_editor(window, cx));
 
         // Корень: [ панель | центр ] по горизонтали + статус-бар внизу.
         // Действия вешаем на корень (а не на редактор): работают и при
@@ -457,6 +660,11 @@ impl Render for Workspace {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_open_workspace))
+            .on_action(cx.listener(Self::on_new_file))
+            .on_action(cx.listener(Self::on_new_folder))
+            .on_action(cx.listener(Self::on_rename_node))
+            .on_action(cx.listener(Self::on_delete_node))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_as))
             .on_action(cx.listener(Self::on_close_tab))
@@ -479,6 +687,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_lower_case))
             .on_action(cx.listener(Self::on_title_case))
             .on_action(cx.listener(Self::on_sentence_case))
+            .on_action(cx.listener(Self::on_find_in_file))
+            .on_action(cx.listener(Self::on_find_in_tabs))
+            .on_action(cx.listener(Self::on_find_in_folder))
+            // Дроп мимо папок дерева: сброс подсветки (drag закончился
+            // вне drop-целей — on_drag_move больше не придёт).
+            .on_drop::<std::path::PathBuf>(cx.listener(|this, _dragged: &std::path::PathBuf, _w, cx| {
+                if this.drop_target.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|_this: &mut Self, _: &Quit, _window, cx| {
                 cx.notify();
                 cx.quit();
@@ -497,6 +715,14 @@ impl Render for Workspace {
         }
         if self.language_input.is_some() {
             root = root.child(self.render_language_overlay(cx));
+        }
+        // Контекстное меню дерева (с подложкой) и диалог имён — дети
+        // корня (паттерн goto/language overlay, D9.2).
+        if self.context_menu.is_some() {
+            root = root.child(self.render_context_menu(cx));
+        }
+        if self.tree_dialog.is_some() {
+            root = root.child(self.render_tree_dialog(cx));
         }
         let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
         crate::perf::note_frame(frame_ms);

@@ -10,6 +10,9 @@ use crate::workspace::Workspace;
 
 impl Workspace {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        // Сам бар скроллится горизонтально (track_scroll даёт handle
+        // полосе); полоса — absolute-оверлей низа обёртки, move/up
+        // обёртки ведут драг ползунка (scrollbar.rs).
         let mut bar = div()
             .id("tab-bar")
             .flex()
@@ -17,7 +20,8 @@ impl Workspace {
             .h(px(TABBAR_H))
             .flex_shrink_0()
             .bg(rgb(TABBAR))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
 
         for ix in 0..self.model.len() {
             let is_active = self.model.active_index() == Some(ix);
@@ -25,13 +29,12 @@ impl Workspace {
             let dirty = self.model.tabs()[ix].dirty;
             let tab = div()
                 .id(("tab", ix))
-                .on_click({
-                    let ix = ix;
+                .on_click(
                     cx.listener(move |this, _, _window, cx| {
                         this.model.activate(ix);
                         cx.notify();
-                    })
-                })
+                    }),
+                )
                 .flex()
                 .items_center()
                 .gap_1()
@@ -48,13 +51,10 @@ impl Workspace {
                 .child(
                     div()
                         .id(("tab-close", ix))
-                        .on_click({
-                            let ix = ix;
-                            cx.listener(move |this, _ev, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab_at(ix, window, cx);
-                            })
-                        })
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab_at(ix, window, cx);
+                        }))
                         .px_1()
                         .hover(|d| d.bg(rgb(CLOSE_HOVER)).rounded_sm())
                         .text_color(rgb(TAB_INACTIVE))
@@ -63,7 +63,7 @@ impl Workspace {
             bar = bar.child(tab);
         }
 
-        bar.child(
+        let bar = bar.child(
             div()
                 .id("new-tab")
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -77,7 +77,29 @@ impl Workspace {
                 .text_color(rgb(TAB_INACTIVE))
                 .hover(|d| d.bg(rgb(CLOSE_HOVER)))
                 .child("+"),
-        )
+        );
+
+        // Обёртка: bar (фиксированная высота) + полоса-оверлей.
+        div()
+            .id("tab-bar-zone")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .on_mouse_move(cx.listener(
+                |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    this.on_scrollbar_drag_move(event, window, cx);
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.on_scrollbar_drag_up(event, window, cx);
+                }),
+            )
+            .child(bar)
+            .child(
+                self.render_horizontal_scrollbar(crate::scrollbar::ScrollTarget::TabBar, cx),
+            )
     }
 
     /// Кнопки перестановки вкладок (кнопки, не drag — D8.2).

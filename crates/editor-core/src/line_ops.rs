@@ -188,7 +188,7 @@ mod tests {
     /// строки перестраиваются, остальной текст не меняется.
     #[test]
     fn sort_selection_scenario() {
-        let mut doc = Document::from_str("header\npear\napple\nbanana\nfooter");
+        let mut doc = Document::from_text("header\npear\napple\nbanana\nfooter");
         // Выделение строк 1..=3.
         let tx = sort_lines(&doc, 1, 3, true, false);
         apply(&mut doc, tx);
@@ -202,12 +202,12 @@ mod tests {
     /// Сортировка без учёта регистра: латиница вперемешку с регистрами.
     #[test]
     fn sort_case_insensitive() {
-        let mut doc = Document::from_str("Beta\nalpha\nCharlie\n");
+        let mut doc = Document::from_text("Beta\nalpha\nCharlie\n");
         let tx = sort_lines(&doc, 0, 2, true, true);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "alpha\nBeta\nCharlie\n");
         // С учётом регистра (байтовый порядок): 'B' < 'a'.
-        let mut doc = Document::from_str("beta\nAlpha\n");
+        let mut doc = Document::from_text("beta\nAlpha\n");
         let tx = sort_lines(&doc, 0, 1, true, false);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "Alpha\nbeta\n");
@@ -218,12 +218,12 @@ mod tests {
     #[test]
     fn sort_preserves_line_boundaries() {
         // EOF без \n.
-        let mut doc = Document::from_str("b\na");
+        let mut doc = Document::from_text("b\na");
         let tx = sort_lines(&doc, 0, 1, true, false);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "a\nb");
         // Внутренний блок: терминатор последней строки остаётся.
-        let mut doc = Document::from_str("x\nb\na\ny");
+        let mut doc = Document::from_text("x\nb\na\ny");
         let tx = sort_lines(&doc, 1, 2, true, false);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "x\na\nb\ny");
@@ -233,19 +233,19 @@ mod tests {
     /// первых вхождений.
     #[test]
     fn dedupe_scenario() {
-        let mut doc = Document::from_str("b\na\nb\nc\na\nb\n");
+        let mut doc = Document::from_text("b\na\nb\nc\na\nb\n");
         let tx = dedupe_lines(&doc, 0, 5);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "b\na\nc\n");
         // Нет дубликатов — no-op (пустая транзакция).
-        let doc = Document::from_str("x\ny\n");
+        let doc = Document::from_text("x\ny\n");
         assert!(dedupe_lines(&doc, 0, 1).is_empty());
     }
 
     /// Удаление пустых строк; пробельные строки остаются.
     #[test]
     fn remove_empty() {
-        let mut doc = Document::from_str("a\n\nb\n   \nc\n");
+        let mut doc = Document::from_text("a\n\nb\n   \nc\n");
         let tx = remove_empty_lines(&doc, 0, 4);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "a\nb\n   \nc\n");
@@ -255,7 +255,7 @@ mod tests {
     /// длина и остальной текст не меняются.
     #[test]
     fn upper_case_scenario() {
-        let mut doc = Document::from_str("say hello, world! ok");
+        let mut doc = Document::from_text("say hello, world! ok");
         let tx = change_case(&doc, &[(4, 17)], CaseMode::Upper);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "say HELLO, WORLD! ok");
@@ -265,17 +265,17 @@ mod tests {
     /// Нижний, заголовочный и sentence-регистры.
     #[test]
     fn lower_title_sentence() {
-        let doc = Document::from_str("MiXeD CaSe TEXT");
-        let mut d = Document::from_str("MiXeD CaSe TEXT");
+        let doc = Document::from_text("MiXeD CaSe TEXT");
+        let mut d = Document::from_text("MiXeD CaSe TEXT");
         apply(&mut d, change_case(&doc, &[(0, 15)], CaseMode::Lower));
         assert_eq!(d.text(), "mixed case text");
 
-        let mut d = Document::from_str("MiXeD CaSe TEXT");
+        let mut d = Document::from_text("MiXeD CaSe TEXT");
         apply(&mut d, change_case(&doc, &[(0, 15)], CaseMode::Title));
         assert_eq!(d.text(), "Mixed Case Text");
 
-        let doc2 = Document::from_str("hello. world! и yet: ANOTHER one");
-        let mut d = Document::from_str("hello. world! и yet: ANOTHER one");
+        let doc2 = Document::from_text("hello. world! и yet: ANOTHER one");
+        let mut d = Document::from_text("hello. world! и yet: ANOTHER one");
         apply(&mut d, change_case(&doc2, &[(0, doc2.len_chars())], CaseMode::Sentence));
         assert_eq!(d.text(), "Hello. World! И yet: another one");
     }
@@ -284,7 +284,7 @@ mod tests {
     /// пересекающиеся отбрасываются from_edits.
     #[test]
     fn case_on_multiple_ranges() {
-        let mut doc = Document::from_str("aa bb cc dd");
+        let mut doc = Document::from_text("aa bb cc dd");
         let tx = change_case(&doc, &[(0, 2), (6, 8)], CaseMode::Upper);
         apply(&mut doc, tx);
         assert_eq!(doc.text(), "AA bb CC dd");
@@ -293,7 +293,7 @@ mod tests {
     /// Сортировка/дедуп одной строки — no-op.
     #[test]
     fn single_line_block_is_noop() {
-        let doc = Document::from_str("only\n");
+        let doc = Document::from_text("only\n");
         assert!(sort_lines(&doc, 2, 2, true, false).is_empty());
         assert!(dedupe_lines(&doc, 0, 0).is_empty());
     }

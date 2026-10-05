@@ -53,7 +53,8 @@ impl Workspace {
         }
         // Порог подсветки: спросить про новые крупные файлы.
         let over: Vec<usize> = opened
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&i| {
                 self.model
                     .tab_mut(i)
@@ -63,6 +64,11 @@ impl Workspace {
         if !over.is_empty() && !crate::bench::enabled() {
             self.pending_threshold_tabs.extend(over);
             self.ask_pending_threshold(window, cx);
+        }
+        // Фоновая раскраска новых вкладок чекпоинтами (сразу, не
+        // дожидаясь прыжков пользователя; workspace.rs).
+        for i in &opened {
+            self.spawn_background_highlight(*i, cx);
         }
         cx.notify();
     }
@@ -89,11 +95,10 @@ impl Workspace {
 
     /// Сохранение по существующему пути; ошибка — в статус-бар.
     fn save_active(&mut self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            if let Err(e) = tab.save() {
+        if let Some(tab) = self.model.active_mut()
+            && let Err(e) = tab.save() {
                 self.status_message = Some(format!("Save failed: {e}"));
             }
-        }
         cx.notify();
     }
 
@@ -109,11 +114,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
                 this.update(cx, |ws, cx| {
-                    if let Some(tab) = ws.model.active_mut() {
-                        if let Err(e) = tab.save_to(&path) {
+                    if let Some(tab) = ws.model.active_mut()
+                        && let Err(e) = tab.save_to(&path) {
                             ws.status_message = Some(format!("Save failed: {e}"));
                         }
-                    }
                     cx.notify();
                 })
                 .ok();
@@ -206,17 +210,11 @@ impl Workspace {
     }
 
     pub(crate) fn on_undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.undo();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| { tab.undo(); }, cx);
     }
 
     pub(crate) fn on_redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.redo();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| { tab.redo(); }, cx);
     }
 
     // ---- Клавиатурный ввод редактора (plain-клавиши; Cmd/Ctrl —
@@ -270,40 +268,32 @@ impl Workspace {
 
     /// Cmd+F2: toggle закладки на строке главной каретки.
     pub(crate) fn on_toggle_bookmark(&mut self, _: &ToggleBookmark, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.toggle_bookmark_on_primary();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.toggle_bookmark_on_primary(), cx);
     }
 
     /// F2: следующая закладка по кругу (+ скролл к ней).
     pub(crate) fn on_next_bookmark(&mut self, _: &NextBookmark, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            if tab.goto_next_bookmark() {
+        if let Some(tab) = self.model.active_mut()
+            && tab.goto_next_bookmark() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);
             }
-        }
         cx.notify();
     }
 
     /// Shift+F2: предыдущая закладка по кругу (+ скролл).
     pub(crate) fn on_prev_bookmark(&mut self, _: &PrevBookmark, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            if tab.goto_prev_bookmark() {
+        if let Some(tab) = self.model.active_mut()
+            && tab.goto_prev_bookmark() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);
             }
-        }
         cx.notify();
     }
 
     /// Клик по маркеру закладки в гуттере строки.
     pub(crate) fn toggle_bookmark_at(&mut self, line: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.toggle_bookmark_at(line);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.toggle_bookmark_at(line), cx);
     }
 
     /// Клик по записи в панели закладок: каретка на строку + скролл.
@@ -319,43 +309,28 @@ impl Workspace {
 
     /// Клик по маркеру свёртывания в гуттере.
     pub(crate) fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.toggle_fold(line);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.toggle_fold(line), cx);
     }
 
     /// «Свернуть всё» (меню View; без горячей клавиши — 8.5).
     pub(crate) fn on_fold_all(&mut self, _: &FoldAll, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.fold_all();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.fold_all(), cx);
     }
 
     /// «Развернуть всё» (меню View).
     pub(crate) fn on_unfold_all(&mut self, _: &UnfoldAll, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.unfold_all();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.unfold_all(), cx);
     }
 
     // ---- Операции со строками (4.6): точки запуска — меню Text,
     // горячих клавиш нет (8.5) ----
 
     pub(crate) fn on_sort_asc(&mut self, _: &SortAsc, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.sort_lines(true, false);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.sort_lines(true, false), cx);
     }
 
     pub(crate) fn on_sort_desc(&mut self, _: &SortDesc, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.sort_lines(false, false);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.sort_lines(false, false), cx);
     }
 
     pub(crate) fn on_sort_asc_ignore_case(
@@ -364,10 +339,7 @@ impl Workspace {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.sort_lines(true, true);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.sort_lines(true, true), cx);
     }
 
     pub(crate) fn on_sort_desc_ignore_case(
@@ -376,10 +348,7 @@ impl Workspace {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.sort_lines(false, true);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.sort_lines(false, true), cx);
     }
 
     pub(crate) fn on_remove_duplicate_lines(
@@ -388,10 +357,7 @@ impl Workspace {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.dedupe_lines();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.dedupe_lines(), cx);
     }
 
     pub(crate) fn on_remove_empty_lines(
@@ -400,38 +366,23 @@ impl Workspace {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.remove_empty_lines();
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.remove_empty_lines(), cx);
     }
 
     pub(crate) fn on_upper_case(&mut self, _: &UpperCase, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.change_case(editor_core::CaseMode::Upper);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.change_case(editor_core::CaseMode::Upper), cx);
     }
 
     pub(crate) fn on_lower_case(&mut self, _: &LowerCase, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.change_case(editor_core::CaseMode::Lower);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.change_case(editor_core::CaseMode::Lower), cx);
     }
 
     pub(crate) fn on_title_case(&mut self, _: &TitleCase, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.change_case(editor_core::CaseMode::Title);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.change_case(editor_core::CaseMode::Title), cx);
     }
 
     pub(crate) fn on_sentence_case(&mut self, _: &SentenceCase, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            tab.change_case(editor_core::CaseMode::Sentence);
-        }
-        cx.notify();
+        self.with_active_tab(|tab| tab.change_case(editor_core::CaseMode::Sentence), cx);
     }
 
     // ---- Мульти-курсор (4.3): Cmd+D ----
@@ -439,12 +390,11 @@ impl Workspace {
     /// Следующий курсор на совпадение слова; скроллим к новому
     /// главному курсору.
     pub(crate) fn on_add_next_match(&mut self, _: &AddNextMatch, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.model.active_mut() {
-            if tab.add_next_word_match() {
+        if let Some(tab) = self.model.active_mut()
+            && tab.add_next_word_match() {
                 let line = tab.cursor_line();
                 self.scroll_to_line(line);
             }
-        }
         cx.notify();
     }
 }

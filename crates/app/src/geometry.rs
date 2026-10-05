@@ -59,6 +59,10 @@ impl Workspace {
 
     /// Колонка по x окна: (x − гуттер) / char_advance, округление к
     /// ближайшей границе символа, clamp по длине строки делает модель.
+    /// Горизонтальный скролл учтён АВТОМАТИЧЕСКИ: bounds uniform_list
+    /// (ребёнок зоны скролла) уже сдвинуты на offset.x (gpui
+    /// `with_element_offset` в prepaint детей) — явно вычитать нельзя
+    /// (двойной счёт).
     pub(crate) fn col_at_x(&mut self, window: &Window, x: f32) -> usize {
         let b = self.editor_bounds();
         let left = b.map(|b| f32::from(b.origin.x)).unwrap_or(0.0);

@@ -20,6 +20,13 @@ impl TempDir {
     pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
+
+    /// Записать файл, вернуть путь.
+    pub(crate) fn write(&self, name: &str, content: &str) -> PathBuf {
+        let path = self.path(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
 }
 
 impl Drop for TempDir {

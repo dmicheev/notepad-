@@ -108,7 +108,7 @@ top();
 
     #[test]
     fn fold_end_and_foldable() {
-        let doc = Document::from_str(CODE);
+        let doc = Document::from_text(CODE);
         // 0: fn main; 1: if cond; 2: deep; 3: tail?; нет —
         // 0 "fn main() {", 1 "  if cond {", 2 "    deep();",
         // 3 "  }", 4 "  tail();", 5 "}", 6 "top();", 7 "".
@@ -124,14 +124,14 @@ top();
     #[test]
     fn blank_lines_belong_to_body() {
         // Пустая строка внутри блока не рвёт тело; хвостовые пустые — не тело.
-        let doc = Document::from_str("head:\n    a\n\n    b\n\ntail\n");
+        let doc = Document::from_text("head:\n    a\n\n    b\n\ntail\n");
         assert_eq!(fold_end(&doc, 0), 3); // до "    b", пустая 4 не в теле
         assert!(is_foldable(&doc, 0));
     }
 
     #[test]
     fn visible_mapping_skips_folded_bodies() {
-        let mut doc = Document::from_str(CODE);
+        let mut doc = Document::from_text(CODE);
         // Всё видно — тождественная мапа.
         assert_eq!(visible_lines(&doc), (0..8).collect::<Vec<_>>());
         // Свернули fn main (строка 0, тело 1..=4).
@@ -147,7 +147,7 @@ top();
 
     #[test]
     fn real_visible_conversions() {
-        let mut doc = Document::from_str(CODE);
+        let mut doc = Document::from_text(CODE);
         doc.line_meta_mut().set_folded(0, true);
         let map = visible_lines(&doc); // [0, 5, 6, 7]
         assert_eq!(real_to_visible(&map, 5), Some(1));

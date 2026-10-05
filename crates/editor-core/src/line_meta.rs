@@ -443,11 +443,10 @@ impl LineMeta {
         let n = &self.nodes[t as usize];
         let lsize = self.size(n.left);
         // Левое поддерево ищем, только если в нём есть строки >= target.
-        if base + lsize > target {
-            if let Some(found) = self.first_bookmarked(n.left, base, target) {
+        if base + lsize > target
+            && let Some(found) = self.first_bookmarked(n.left, base, target) {
                 return Some(found);
             }
-        }
         let here = base + lsize;
         if here >= target && n.bookmark {
             return Some(here);
@@ -464,11 +463,10 @@ impl LineMeta {
         let lsize = self.size(n.left);
         let here = base + lsize;
         // Правое поддерево ищем, только если в нём есть строки < target.
-        if here + 1 < target {
-            if let Some(found) = self.last_bookmarked(n.right, here + 1, target) {
+        if here + 1 < target
+            && let Some(found) = self.last_bookmarked(n.right, here + 1, target) {
                 return Some(found);
             }
-        }
         if here < target && n.bookmark {
             return Some(here);
         }
@@ -486,7 +484,7 @@ mod tests {
     /// двух строк выше — смещаются вниз на 2, количество не меняется.
     #[test]
     fn bookmarks_survive_insertion_of_two_lines_above() {
-        let mut doc = Document::from_str("l0\nl1\nl2\nl3\nl4\n");
+        let mut doc = Document::from_text("l0\nl1\nl2\nl3\nl4\n");
         {
             let meta = doc.line_meta_mut();
             meta.set_bookmark(2);
@@ -505,7 +503,7 @@ mod tests {
 
     #[test]
     fn insert_below_bookmark_leaves_it_in_place() {
-        let mut doc = Document::from_str("l0\nl1\nl2\n");
+        let mut doc = Document::from_text("l0\nl1\nl2\n");
         doc.line_meta_mut().set_bookmark(0);
         doc.apply(&Transaction::from_edits(vec![Edit::insert(6, "new\n")]));
         assert_eq!(doc.text(), "l0\nl1\nnew\nl2\n");
@@ -514,7 +512,7 @@ mod tests {
 
     #[test]
     fn delete_line_above_shifts_bookmark_up() {
-        let mut doc = Document::from_str("a\nb\nc\nd\n");
+        let mut doc = Document::from_text("a\nb\nc\nd\n");
         doc.line_meta_mut().set_bookmark(2);
         doc.apply(&Transaction::from_edits(vec![Edit::delete(0, 2)]));
         assert_eq!(doc.text(), "b\nc\nd\n");
@@ -524,7 +522,7 @@ mod tests {
 
     #[test]
     fn delete_line_below_keeps_bookmark_in_place() {
-        let mut doc = Document::from_str("a\nb\nc\nd\n");
+        let mut doc = Document::from_text("a\nb\nc\nd\n");
         doc.line_meta_mut().set_bookmark(1);
         // Удаляем строку 3 ("d\n", [6..8)).
         doc.apply(&Transaction::from_edits(vec![Edit::delete(6, 8)]));
@@ -537,7 +535,7 @@ mod tests {
     /// флаги и сдвигаются вверх.
     #[test]
     fn flags_on_deleted_lines_are_lost() {
-        let mut doc = Document::from_str("a\nb\nc\nd\n");
+        let mut doc = Document::from_text("a\nb\nc\nd\n");
         {
             let meta = doc.line_meta_mut();
             meta.set_bookmark(2);
@@ -559,7 +557,7 @@ mod tests {
     /// строк заменой.
     #[test]
     fn replace_edit_keeps_first_line_flags() {
-        let mut doc = Document::from_str("a\nb\nc\nd\n");
+        let mut doc = Document::from_text("a\nb\nc\nd\n");
         {
             let meta = doc.line_meta_mut();
             meta.set_folded(0, true);
@@ -576,7 +574,7 @@ mod tests {
 
     #[test]
     fn multiline_transaction_from_edits_syncs_meta() {
-        let mut doc = Document::from_str("one\ntwo\nthree\nfour\n");
+        let mut doc = Document::from_text("one\ntwo\nthree\nfour\n");
         {
             let meta = doc.line_meta_mut();
             meta.set_bookmark(1);
@@ -618,7 +616,7 @@ mod tests {
 
         // Синхронизация с транзакциями поверх скелета: вставка строк
         // выше сдвигает флаги за содержимым.
-        let mut doc = Document::from_str(&"l\n".repeat(4_999)); // 5_000 строк
+        let mut doc = Document::from_text(&"l\n".repeat(4_999)); // 5_000 строк
         doc.line_meta_mut().set_bookmark(4_999);
         doc.apply(&Transaction::from_edits(vec![Edit::insert(0, "x\ny\n")]));
         assert_eq!(doc.line_meta().bookmarked_lines(), vec![5_001]);
@@ -679,7 +677,7 @@ mod tests {
     #[test]
     fn insert_at_line_boundaries() {
         // Вставка в конец документа без '\n' не добавляет строк.
-        let mut doc = Document::from_str("ab\ncd");
+        let mut doc = Document::from_text("ab\ncd");
         doc.line_meta_mut().set_bookmark(1);
         doc.apply(&Transaction::from_edits(vec![Edit::insert(5, "tail")]));
         assert_eq!(doc.text(), "ab\ncdtail");
@@ -705,7 +703,7 @@ mod tests {
     /// обнуляется при удалении свёрнутой строки.
     #[test]
     fn folded_counter_survives_shifts() {
-        let mut doc = Document::from_str("l0\nl1\nl2\n");
+        let mut doc = Document::from_text("l0\nl1\nl2\n");
         doc.line_meta_mut().set_folded(2, true);
         doc.apply(&Transaction::from_edits(vec![Edit::insert(0, "x\ny\n")]));
         let meta = doc.line_meta();
@@ -725,7 +723,7 @@ mod tests {
 
     impl NaiveMeta {
         fn insert(&mut self, pos: usize, count: usize) {
-            self.0.splice(pos..pos, std::iter::repeat((false, false)).take(count));
+            self.0.splice(pos..pos, std::iter::repeat_n((false, false), count));
         }
         fn remove(&mut self, pos: usize, count: usize) {
             self.0.drain(pos..pos + count);
@@ -743,7 +741,7 @@ mod tests {
     #[test]
     fn random_transactions_match_naive_model() {
         let mut rng: u64 = 0x0DDB_1A5E_5BAD_5EED;
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut meta = LineMeta::with_lines(doc.len_lines());
         let mut naive = NaiveMeta(vec![(false, false)]);
 
@@ -755,7 +753,7 @@ mod tests {
                         break;
                     }
                     let line = (next(&mut rng) as usize) % naive.0.len();
-                    if next(&mut rng) % 2 == 0 {
+                    if next(&mut rng).is_multiple_of(2) {
                         meta.toggle_bookmark(line);
                         naive.0[line].0 = !naive.0[line].0;
                     } else {
@@ -772,14 +770,14 @@ mod tests {
                 let mut cursor = 0usize;
                 for _ in 0..n_edits {
                     let start = cursor + (next(&mut rng) as usize % (len - cursor + 1));
-                    let end = if start < len && next(&mut rng) % 2 == 0 {
+                    let end = if start < len && next(&mut rng).is_multiple_of(2) {
                         start + 1 + (next(&mut rng) as usize % (len - start))
                     } else {
                         start
                     };
                     let mut text = String::new();
                     for _ in 0..next(&mut rng) % 6 {
-                        if next(&mut rng) % 5 == 0 {
+                        if next(&mut rng).is_multiple_of(5) {
                             text.push('\n');
                         } else {
                             text.push((b'a' + (next(&mut rng) % 26) as u8) as char);
@@ -841,7 +839,7 @@ mod tests {
     /// Индекс, встроенный в Document, остаётся синхронным с rope.
     #[test]
     fn document_meta_stays_in_sync() {
-        let mut doc = Document::from_str("a\nb\nc\nd\n");
+        let mut doc = Document::from_text("a\nb\nc\nd\n");
         doc.line_meta_mut().set_bookmark(1);
         let tx = Transaction::from_edits(vec![Edit::insert(0, "X\n")]);
         let inverse = doc.apply(&tx);

@@ -13,6 +13,7 @@ gpui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+notify.workspace = true
 editor-core = { path = "../editor-core" }
 i18n = { path = "../i18n" }
 

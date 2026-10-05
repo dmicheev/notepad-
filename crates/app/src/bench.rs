@@ -247,7 +247,7 @@ async fn frame(window: &WindowHandle<Workspace>, cx: &mut AsyncApp) {
         }
     }
     let t = Instant::now();
-    let any: gpui::AnyWindowHandle = window.clone().into();
+    let any: gpui::AnyWindowHandle = (*window).into();
     let _ = any.update(cx, |_root, window: &mut Window, cx| {
         let clear = window.draw(cx);
         clear.clear();

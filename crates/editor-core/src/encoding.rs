@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn new_document_saves_utf8_lf_by_default() {
         let dir = TempDir::new("newdoc");
-        let doc = Document::from_str("строка один\nстрока два\n");
+        let doc = Document::from_text("строка один\nстрока два\n");
         assert_eq!(doc.encoding(), Encoding::utf8());
         assert_eq!(doc.line_endings().dominant(), LineEnding::Lf);
 

@@ -144,7 +144,8 @@ mod tests {
     #[test]
     fn session_state_roundtrip() {
         let state = SessionState {
-            workspace: None,
+            // Воркспейс (7.4) сериализуется как путь.
+            workspace: Some(PathBuf::from("/tmp/notes-root")),
             tabs: vec![
                 SessionTab { path: PathBuf::from("/tmp/a.txt") },
                 SessionTab { path: PathBuf::from("/tmp/b.rs") },

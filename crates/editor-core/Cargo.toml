@@ -12,3 +12,5 @@ fancy-regex.workspace = true
 encoding_rs.workspace = true
 chardetng.workspace = true
 serde.workspace = true
+rayon.workspace = true
+memmap2.workspace = true

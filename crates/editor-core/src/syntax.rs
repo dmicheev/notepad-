@@ -10,8 +10,8 @@
 //!   (комментарии/ключи/таблицы/строки/числа/булевы): Cargo.toml и
 //!   прочие конфиги подсвечиваются;
 //! - **TypeScript** — псевдоним на JavaScript-грамматику (TS —
-//! надмножество JS; типы красятся неточно, базовые конструкции —
-//! корректно). Детект возвращает грамматику + метку «TypeScript».
+//!   надмножество JS; типы красятся неточно, базовые конструкции —
+//!   корректно). Детект возвращает грамматику + метку «TypeScript».
 //!
 //! Ловушка (D12): набор `load_defaults_newlines` ждёт строки С
 //! терминатором — движок подсветки (highlight.rs) кормит `line_str`
@@ -179,11 +179,10 @@ pub fn detect_labeled(
     // Без расширения — содержимое: shebang и маркеры первой строки
     // ловит find_syntax_by_first_line. Файлы с неизвестным расширением
     // не эвристим (предсказуемость: .weird с shebang — экзотика).
-    if ext.is_none() {
-        if let Some(s) = first_line.and_then(detect_by_first_line) {
+    if ext.is_none()
+        && let Some(s) = first_line.and_then(detect_by_first_line) {
             return Some((s, friendly_name(&s.name)));
         }
-    }
     None
 }
 
@@ -300,7 +299,7 @@ mod tests {
     fn toml_syntax_loads_and_highlights() {
         let mut e = crate::highlight::HighlightEngine::new();
         e.set_syntax(Some(detect_by_extension("toml").unwrap()));
-        let d = crate::document::Document::from_str(
+        let d = crate::document::Document::from_text(
             "# comment\n[table]\nkey = \"value\"\nn = 42\nok = true\n",
         );
         e.ensure_window(&d, 0, 5);

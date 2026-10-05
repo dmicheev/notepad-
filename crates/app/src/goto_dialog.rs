@@ -19,20 +19,24 @@ impl Workspace {
         }
     }
 
-    /// Клавиши overlay-диалога: цифры/backspace — ввод, Enter — переход,
-    /// Escape — отмена. Висит на диалоге (фокус диалога — редактор
-    /// клавиш не получает).
+    /// Клавиши overlay-диалога: разбор буфера — overlay_input (цифры,
+    /// лимит 9), Enter — переход, Escape — отмена. Висит на диалоге
+    /// (фокус диалога — редактор клавиш не получает).
     pub(crate) fn handle_goto_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ks = &event.keystroke;
-        let Some(input) = &mut self.goto_input else { return };
-        match ks.key.as_str() {
-            "enter" => {
-                let target = input.trim().parse::<usize>().ok();
+        let outcome = self
+            .goto_input
+            .as_mut()
+            .map(|input| {
+                crate::overlay_input::feed(input, event, 9, |c| c.is_ascii_digit())
+            });
+        match outcome {
+            Some(crate::overlay_input::InputKey::Submit) => {
+                let target = self.goto_input.as_deref().unwrap_or("").trim().parse::<usize>().ok();
                 self.goto_input = None;
                 window.focus(&self.focus);
                 if let Some(no) = target {
@@ -46,22 +50,11 @@ impl Workspace {
                     }
                 }
             }
-            "escape" => {
+            Some(crate::overlay_input::InputKey::Cancel) => {
                 self.goto_input = None;
                 window.focus(&self.focus);
             }
-            "backspace" => {
-                input.pop();
-            }
-            _ => {
-                if let Some(ch) = ks.key_char.as_deref().or(Some(ks.key.as_str())) {
-                    for c in ch.chars().filter(|c| c.is_ascii_digit()) {
-                        if input.len() < 9 {
-                            input.push(c);
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
         cx.notify();
     }

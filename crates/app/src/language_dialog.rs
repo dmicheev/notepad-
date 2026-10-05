@@ -67,46 +67,38 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Клавиши overlay: символы — фильтр, backspace, Enter — первый
-    /// видимый вариант, Escape — отмена. Висит на overlay (фокус —
-    /// редактор клавиш не получает).
+    /// Клавиши overlay: разбор буфера — overlay_input (без контролей,
+    /// лимит 32), Enter — первый видимый вариант, Escape — отмена.
+    /// Висит на overlay (фокус — редактор клавиш не получает).
     pub(crate) fn handle_language_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ks = &event.keystroke;
-        let Some(input) = &mut self.language_input else { return };
-        match ks.key.as_str() {
-            "enter" => {
+        let outcome = self
+            .language_input
+            .as_mut()
+            .map(|input| crate::overlay_input::feed(input, event, 32, |c| !c.is_control()));
+        match outcome {
+            Some(crate::overlay_input::InputKey::Submit) => {
                 let choice = self.filtered_languages().into_iter().next().map(str::to_string);
                 if let Some(choice) = choice {
                     self.apply_language_choice(&choice, window, cx);
                 }
             }
-            "escape" => {
+            Some(crate::overlay_input::InputKey::Cancel) => {
                 self.language_input = None;
                 window.focus(&self.focus);
             }
-            "backspace" => {
-                input.pop();
-            }
-            _ => {
-                if let Some(ch) = ks.key_char.as_deref() {
-                    for c in ch.chars() {
-                        if !c.is_control() && input.len() < 32 {
-                            input.push(c);
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
         cx.notify();
     }
 
-    /// Отфильтрованный список для overlay: спец-записи + языки,
-    /// содержащие ввод (регистронезависимо).
+    /// Отфильтрованный список для overlay: спец-записи всегда видны
+    /// (Enter по ним валиден — авто/текст), далее языки, содержащие
+    /// ввод (регистронезависимо).
     pub(crate) fn filtered_languages(&self) -> Vec<&'static str> {
         let query = self
             .language_input
@@ -122,15 +114,14 @@ impl Workspace {
                 .into_iter()
                 .filter(|n| matches(n)),
         );
-        // Пустой фильтр без совпадений — хотя бы спец-записи (Enter по
-        // ним валиден: авто/текст).
-        let _ = matches; // уже применён выше
         out
     }
 
     /// Overlay списка языков: ребёнок КОРНЯ (как Cmd+G, D9.2), над
     /// статус-баром. Позиция/размер (bottom 32, left 340, ширина 320,
     /// высота 320) подобраны вручную: над статус-баром, правее панели.
+    /// Скроллится внутренний список (track_scroll), полоса — оверлей
+    /// обёртки (scrollbar.rs); move/up обёртки ведут драг ползунка.
     pub(crate) fn render_language_overlay(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let input = self.language_input.clone().unwrap_or_default();
         let items = self.filtered_languages();
@@ -140,7 +131,7 @@ impl Workspace {
             list = list.child(
                 div()
                     .id(("lang-item", li))
-                    .debug_selector(move || format!("lang-item:{name}").into())
+                    .debug_selector(move || format!("lang-item:{name}"))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
@@ -162,7 +153,7 @@ impl Workspace {
             .left(px(340.0))
             .w(px(320.0))
             .max_h(px(320.0))
-            .overflow_y_scroll()
+            .relative()
             .flex()
             .flex_col()
             .pb_2()
@@ -173,6 +164,17 @@ impl Workspace {
             .shadow_md()
             .track_focus(&self.language_focus)
             .on_key_down(cx.listener(Self::handle_language_key))
+            .on_mouse_move(cx.listener(
+                |this, event: &gpui::MouseMoveEvent, window, cx| {
+                    this.on_scrollbar_drag_move(event, window, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                    this.on_scrollbar_drag_up(event, window, cx);
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -194,7 +196,14 @@ impl Workspace {
                             }),
                     ),
             )
-            .child(list)
+            .child(
+                list.id("language-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.language_scroll),
+            )
+            .child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Language, cx))
             .into_any_element()
     }
 }

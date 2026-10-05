@@ -4,21 +4,30 @@
 
 mod actions;
 mod bench;
+mod buffer_tab;
 mod editor_actions;
 mod editor_mouse;
 mod editor_view;
 mod folding;
+mod fs_tree;
+mod fs_watch;
 mod geometry;
 mod goto_dialog;
 mod language;
 mod language_dialog;
+mod overlay_input;
 mod perf;
 mod project_panel;
+mod scrollbar;
+mod search_panel;
+mod search_render;
+mod search_scan;
 mod session;
 mod status_bar;
 mod tab_bar;
 mod tab_model;
 mod theme;
+mod tree_panel;
 mod workspace;
 
 #[cfg(test)]
@@ -32,8 +41,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddNextMatch, CloseTab, FoldAll, GoToLine, LowerCase, NextBookmark, OpenFile, PrevBookmark,
-    Quit, Redo, RemoveDuplicateLines, RemoveEmptyLines, SaveFile, SaveFileAs, SentenceCase,
+    AddNextMatch, CloseTab, DeleteNode, FindInFile, FindInFolder, FindInTabs, FoldAll, GoToLine,
+    LowerCase, NewFile, NewFolder, NextBookmark, OpenFile, OpenWorkspace, PrevBookmark, Quit,
+    Redo, RemoveDuplicateLines, RemoveEmptyLines, RenameNode, SaveFile, SaveFileAs, SentenceCase,
     SortAsc, SortAscIgnoreCase, SortDesc, SortDescIgnoreCase, TitleCase, ToggleBookmark, Undo,
     UnfoldAll, UpperCase,
 };
@@ -48,15 +58,15 @@ fn main() {
     // закрытием последнего окна — D8.4).
     app.on_reopen(|cx: &mut App| {
         if cx.windows().is_empty() {
-        open_workspace_window(cx, None);
-        // Бенчмарк-стенд (D11.1): активировать приложение ПОСЛЕ создания
-        // окна — на macOS перерисовка gpui идёт через CVDisplayLink,
-        // который стартует только для видимого/активного окна; без
-        // активации при запуске из CLI стенд не получит кадры после
-        // первого (display link не запускается).
-        if bench::enabled() {
-            cx.activate(true);
-        }
+            open_workspace_window(cx, None);
+            // Бенчмарк-стенд (D11.1): активировать приложение ПОСЛЕ создания
+            // окна — на macOS перерисовка gpui идёт через CVDisplayLink,
+            // который стартует только для видимого/активного окна; без
+            // активации при запуске из CLI стенд не получит кадры после
+            // первого (display link не запускается).
+            if bench::enabled() {
+                cx.activate(true);
+            }
         }
     });
     app.run(|cx: &mut App| {
@@ -64,6 +74,7 @@ fn main() {
         // editing-пути через History; полный справочник — 8.5, D8.1).
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, None),
+            KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
             KeyBinding::new("cmd-s", SaveFile, None),
             KeyBinding::new("cmd-shift-s", SaveFileAs, None),
             KeyBinding::new("cmd-w", CloseTab, None),
@@ -79,50 +90,100 @@ fn main() {
             KeyBinding::new("cmd-f2", ToggleBookmark, None),
             KeyBinding::new("f2", NextBookmark, None),
             KeyBinding::new("shift-f2", PrevBookmark, None),
+            // Поиск (6): Cmd+F — панель поиска в файле; Cmd+Shift+F —
+            // поиск по открытым вкладкам. Поиск по папке и замена —
+            // меню Search (без хоткеев, раскладка — 8.5).
+            KeyBinding::new("cmd-f", FindInFile, None),
+            KeyBinding::new("cmd-shift-f", FindInTabs, None),
+            // Дерево воркспейса (7.2): создание/переименование/удаление
+            // по выделению дерева (контекстное меню — правый клик);
+            // F2 занят закладками → rename по IntelliJ-жесту Shift+F6,
+            // удаление — Finder-стиль Cmd+Backspace.
+            KeyBinding::new("cmd-n", NewFile, None),
+            KeyBinding::new("cmd-shift-n", NewFolder, None),
+            KeyBinding::new("shift-f6", RenameNode, None),
+            KeyBinding::new("cmd-backspace", DeleteNode, None),
         ]);
-        cx.set_menus(vec![Menu {
-            name: "notepad+".into(),
-            items: vec![
-                MenuItem::action("Open…", OpenFile),
-                MenuItem::action("Save", SaveFile),
-                MenuItem::action("Save As…", SaveFileAs),
-                MenuItem::action("Close Tab", CloseTab),
-                MenuItem::action("Undo", Undo),
-                MenuItem::action("Redo", Redo),
-                MenuItem::action("Go to Line…", GoToLine),
-                MenuItem::action("Toggle Bookmark", ToggleBookmark),
-                MenuItem::action("Next Bookmark", NextBookmark),
-                MenuItem::action("Previous Bookmark", PrevBookmark),
-                MenuItem::action("Quit", Quit),
-            ],
-        },
-        // Вид: свёртывание блоков (4.5). Горячих клавиш нет — полный
-        // справочник в 8.5.
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action("Fold All", FoldAll),
-                MenuItem::action("Unfold All", UnfoldAll),
-            ],
-        },
-        // Текст: операции со строками (4.6). Горячих клавиш нет — 8.5.
-        Menu {
-            name: "Text".into(),
-            items: vec![
-                MenuItem::action("Sort Lines Ascending", SortAsc),
-                MenuItem::action("Sort Lines Descending", SortDesc),
-                MenuItem::action("Sort Lines Ascending (Ignore Case)", SortAscIgnoreCase),
-                MenuItem::action("Sort Lines Descending (Ignore Case)", SortDescIgnoreCase),
-                MenuItem::action("Remove Duplicate Lines", RemoveDuplicateLines),
-                MenuItem::action("Remove Empty Lines", RemoveEmptyLines),
-                MenuItem::separator(),
-                MenuItem::action("UPPER CASE", UpperCase),
-                MenuItem::action("lower case", LowerCase),
-                MenuItem::action("Title Case", TitleCase),
-                MenuItem::action("Sentence case", SentenceCase),
-            ],
-        },
-    ]);
+        cx.set_menus(vec![
+            // App-меню (macOS): только выход; всё остальное — по
+            // стандартным меню ниже (правка ручной проверки: единый
+            // список в app-меню не давал привычного «File»).
+            Menu {
+                name: "notepad+".into(),
+                items: vec![MenuItem::action("Quit", Quit)],
+            },
+            // Файлы и воркспейс: открытие/сохранение/вкладки (3.x, 7.x)
+            // + создание в дереве (7.2).
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("New File", NewFile),
+                    MenuItem::action("New Folder", NewFolder),
+                    MenuItem::separator(),
+                    MenuItem::action("Open…", OpenFile),
+                    MenuItem::action("Open Workspace…", OpenWorkspace),
+                    MenuItem::separator(),
+                    MenuItem::action("Save", SaveFile),
+                    MenuItem::action("Save As…", SaveFileAs),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Tab", CloseTab),
+                ],
+            },
+            // Правка: undo/redo (2.4) — стандартное место.
+            Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::action("Undo", Undo),
+                    MenuItem::action("Redo", Redo),
+                ],
+            },
+            // Навигация: переход к строке (4.2) и закладки (4.4).
+            Menu {
+                name: "Navigate".into(),
+                items: vec![
+                    MenuItem::action("Go to Line…", GoToLine),
+                    MenuItem::separator(),
+                    MenuItem::action("Toggle Bookmark", ToggleBookmark),
+                    MenuItem::action("Next Bookmark", NextBookmark),
+                    MenuItem::action("Previous Bookmark", PrevBookmark),
+                ],
+            },
+            // Вид: свёртывание блоков (4.5). Горячих клавиш нет — полный
+            // справочник в 8.5.
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Fold All", FoldAll),
+                    MenuItem::action("Unfold All", UnfoldAll),
+                ],
+            },
+            // Поиск (6): в файле / по вкладкам / по папке; замена — в панели.
+            Menu {
+                name: "Search".into(),
+                items: vec![
+                    MenuItem::action("Find…", FindInFile),
+                    MenuItem::action("Find in Tabs…", FindInTabs),
+                    MenuItem::action("Find in Folder…", FindInFolder),
+                ],
+            },
+            // Текст: операции со строками (4.6). Горячих клавиш нет — 8.5.
+            Menu {
+                name: "Text".into(),
+                items: vec![
+                    MenuItem::action("Sort Lines Ascending", SortAsc),
+                    MenuItem::action("Sort Lines Descending", SortDesc),
+                    MenuItem::action("Sort Lines Ascending (Ignore Case)", SortAscIgnoreCase),
+                    MenuItem::action("Sort Lines Descending (Ignore Case)", SortDescIgnoreCase),
+                    MenuItem::action("Remove Duplicate Lines", RemoveDuplicateLines),
+                    MenuItem::action("Remove Empty Lines", RemoveEmptyLines),
+                    MenuItem::separator(),
+                    MenuItem::action("UPPER CASE", UpperCase),
+                    MenuItem::action("lower case", LowerCase),
+                    MenuItem::action("Title Case", TitleCase),
+                    MenuItem::action("Sentence case", SentenceCase),
+                ],
+            },
+        ]);
 
         open_workspace_window(cx, None);
     });
@@ -163,6 +224,14 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
 
     let plan: Option<RestorePlan> =
         state.as_ref().map(|s| session::plan_restore(s, |p| p.exists()));
+
+    // Воркспейс (7.4): последний открытый восстанавливается при
+    // старте; исчезнувшая папка — тихо пропускается (дерево можно
+    // открыть заново через Cmd+Shift+O).
+    let restore_workspace: Option<std::path::PathBuf> = state
+        .as_ref()
+        .and_then(|s| s.workspace.clone())
+        .filter(|p| p.is_dir());
 
     let window = cx
         .open_window(
@@ -213,12 +282,16 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                         if let Some(e) = open_error {
                             status = status.or(Some(e));
                         }
-                        // Порог подсветки (5.3): уведомление, если
-                        // восстановленная вкладка >20 МБ (без гонки с
                     }
                     // Восстановленные вкладки сверх порога — в очередь
                     // вопроса (диалог после создания окна, D12.4).
                     ws.queue_threshold_ask();
+                    // Последний воркспейс (7.4): дерево + наблюдатель
+                    // (bench-режим сессию не восстанавливает — путь
+                    // остаётся None).
+                    if let Some(root) = restore_workspace {
+                        ws.open_workspace_folder(&root, cx);
+                    }
                     if let Some(m) = status.take() {
                         ws.status_message = Some(m);
                     }
@@ -266,20 +339,17 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
         .expect("update window");
 
     if bench::enabled() {
-        bench::start(window.clone(), cx);
+        bench::start(window, cx);
     }
 
     // Cmd+Q / платформенный выход: сохранить сессию (наблюдатель
     // on_app_quit покрывает все пути завершения).
     // leak: подписка должна жить всё время приложения.
-    cx.on_app_quit({
-        let window = window.clone();
-        move |cx| {
-            let _ = window.update(cx, |ws: &mut Workspace, window, _cx| {
-                ws.persist(window);
-            });
-            std::future::ready(())
-        }
+    cx.on_app_quit(move |cx| {
+        let _ = window.update(cx, |ws: &mut Workspace, window, _cx| {
+            ws.persist(window);
+        });
+        std::future::ready(())
     })
     .detach();
 }

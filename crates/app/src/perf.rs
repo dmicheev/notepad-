@@ -10,6 +10,7 @@
 //!   `TabModel::open_path`, покрывает диалог/сессию/NOTEPAD_OPEN);
 //! - память: `proc_pid_rusage` (libproc, macOS) — без новых
 //!   зависимостей; на других ОС секция памяти показывает n/a.
+//!
 //! Пики RSS/footprint — максимумы по моментам сэмплирования (рендер
 //! панели).
 
@@ -60,7 +61,7 @@ impl FrameRing {
         if self.filled == 0 {
             return None;
         }
-        let window: Vec<f64> = self.samples[..self.filled].iter().copied().collect();
+        let window: Vec<f64> = self.samples[..self.filled].to_vec();
         let mut sorted = window.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];

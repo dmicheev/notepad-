@@ -32,15 +32,24 @@ use crate::workspace::Workspace;
 /// spike): кадры дороже этого значения попадают в stderr.
 const SLOW_FRAME_MS: f64 = 8.0;
 
+/// Хвост ширины горизонтального скролла (px): запас за концом самой
+/// длинной строки — табы моно-шрифта шире advance, курсор за концом
+/// строки должен быть виден.
+const H_SCROLL_TAIL: f32 = 40.0;
+
 /// Один кусок строки после разреза в позициях кареток/выделений:
 /// `caret_before` — 2px-каретка перед куском, `selected` — фоновая
 /// подсветка, `class` — класс стиля подсветки (5.2; None — обычный
-/// текст, цвет наследуется). Позиции без метрик шрифта (D8.1/D9.1).
+/// текст, цвет наследуется), `search_hit`/`search_current` — совпадение
+/// поиска/текущее совпадение (6.1; приоритет фона: выделение &gt;
+/// текущее &gt; совпадение). Позиции без метрик шрифта (D8.1/D9.1).
 pub(crate) struct LineSegment {
     pub(crate) text: String,
     pub(crate) selected: bool,
     pub(crate) caret_before: bool,
     pub(crate) class: Option<u8>,
+    pub(crate) search_hit: bool,
+    pub(crate) search_current: bool,
 }
 
 /// Разрезать текст строки в границах кареток (char-колонки, «каретка
@@ -52,7 +61,7 @@ pub(crate) fn split_line(
     carets: &[usize],
     sel_ranges: &[(usize, usize)],
 ) -> Vec<LineSegment> {
-    split_line_styled(content, carets, sel_ranges, &[])
+    split_line_full(content, carets, sel_ranges, &[], &[])
 }
 
 /// `split_line` + цветовые диапазоны подсветки (5.2): сегменты режутся
@@ -66,10 +75,23 @@ pub(crate) fn split_line_styled(
     sel_ranges: &[(usize, usize)],
     colors: &[Span],
 ) -> Vec<LineSegment> {
+    split_line_full(content, carets, sel_ranges, colors, &[])
+}
+
+/// Полный разрез: каретки + выделения + цвета + совпадения поиска
+/// (6.1). `hits` — col-диапазоны совпадений, `current_flags` — какой
+/// из них текущий (длины синхронны hits).
+pub(crate) fn split_line_full(
+    content: &str,
+    carets: &[usize],
+    sel_ranges: &[(usize, usize)],
+    colors: &[Span],
+    hits: &[((usize, usize), bool)],
+) -> Vec<LineSegment> {
     let len = content.chars().count();
     let clamp = |c: usize| c.min(len);
     let mut bounds: Vec<usize> =
-        Vec::with_capacity(carets.len() * 2 + sel_ranges.len() * 2 + colors.len() * 2 + 2);
+        Vec::with_capacity(carets.len() * 2 + sel_ranges.len() * 2 + colors.len() * 2 + hits.len() * 4 + 2);
     bounds.push(0);
     bounds.push(len);
     bounds.extend(carets.iter().map(|c| clamp(*c)));
@@ -82,6 +104,10 @@ pub(crate) fn split_line_styled(
             bounds.push(clamp(sp.start as usize));
             bounds.push(clamp(sp.end as usize));
         }
+    }
+    for ((s, e), _) in hits {
+        bounds.push(clamp(*s));
+        bounds.push(clamp(*e));
     }
     bounds.sort_unstable();
     bounds.dedup();
@@ -106,7 +132,27 @@ pub(crate) fn split_line_styled(
                     .iter()
                     .find(|sp| b >= clamp(sp.start as usize) && next <= clamp(sp.end as usize))
                     .map(|sp| sp.class);
-                segments.push(LineSegment { text, selected, caret_before: caret, class });
+                // Текущее совпадение имеет приоритет над обычным
+                // (сегмент может лежать в обоих).
+                let mut search_current = false;
+                let mut search_hit = false;
+                for ((s, e), cur) in hits {
+                    if b >= clamp(*s) && next <= clamp(*e) {
+                        if *cur {
+                            search_current = true;
+                        } else {
+                            search_hit = true;
+                        }
+                    }
+                }
+                segments.push(LineSegment {
+                    text,
+                    selected,
+                    caret_before: caret,
+                    class,
+                    search_hit,
+                    search_current,
+                });
                 continue;
             }
         }
@@ -116,6 +162,8 @@ pub(crate) fn split_line_styled(
                 selected: false,
                 caret_before: true,
                 class: None,
+                search_hit: false,
+                search_current: false,
             });
         }
     }
@@ -152,7 +200,11 @@ pub(crate) fn line_carets(
 }
 
 impl Workspace {
-    pub(crate) fn render_editor(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         if self.model.is_empty() {
             return div()
                 .id("editor-empty")
@@ -199,11 +251,25 @@ impl Workspace {
         let active_line = tab.primary().is_caret().then(|| tab.cursor_line());
         // Все курсоры вкладки (4.3).
         let cursors = tab.cursors.clone();
+        // Ширина контента горизонтального скролла: гуттер + самая
+        // широкая виденная строка (ракетка рендера, tab_model) +
+        // хвост; advance моноширинного Menlo — колоночная арифметика
+        // точна (табы чуть шире — хвост вбирает). Меньше вьюпорта —
+        // не бывает: список ещё и min_w_full. Считается ДО заёма
+        // вкладки ниже (char_advance — &mut self).
+        let max_cols = tab.max_seen_cols();
+        let advance = self.char_advance(window);
+        let content_w = GUTTER_W + max_cols as f32 * advance + H_SCROLL_TAIL;
 
         let mut editor = div()
             .id("editor")
-            // relative — якорь absolute-оверлея липкой шапки (D12.5).
+            // relative — якорь absolute-оверлея липкой шапки (D12.5)
+            // и панели поиска. flex-колонка: [строка: зона скролла |
+            // вертикальная дорожка] + горизонтальная дорожка снизу —
+            // ползунки в СВОИХ полосах, текст не перекрывается.
             .relative()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
@@ -213,13 +279,30 @@ impl Workspace {
             .on_mouse_move(cx.listener(Self::on_editor_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_editor_mouse_up))
             .child(
+                div()
+                    .id("editor-content-row")
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    // Зона горизонтального скролла (внешняя, вокруг
+                    // списка): вертикаль остаётся в uniform_list — оси
+                    // независимы. min_w_0 — делит строку с дорожкой.
+                    .child(
+                        div()
+                            .id("editor-hscroll")
+                            .flex_1()
+                            .min_w_0()
+                            .relative()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.h_scroll)
+                            .child(
                 uniform_list(
                     "lines",
                     line_count,
                     cx.processor(
                         move |this: &mut Self,
                               range: std::ops::Range<usize>,
-                              _window: &mut Window,
+                              window: &mut Window,
                               cx: &mut Context<Self>| {
                             // Бенчмарк 4.1 (паттерн spike): время сборки
                             // видимых строк; кадры дороже порога — в
@@ -229,22 +312,47 @@ impl Workspace {
                             // заёма вкладки (движок подсветки — &mut).
                             let reals: Vec<usize> =
                                 range.clone().map(|ix| this.visible_to_real(ix)).collect();
+                            // Совпадения поиска (6.1) для окна — тоже ДО
+                            // заёма вкладки (метод читает модель).
+                            let line_hits: Vec<Vec<((usize, usize), bool)>> = reals
+                                .iter()
+                                .copied()
+                                .map(|real| {
+                                    let (ranges, curs) = this.search_line_hits(real);
+                                    ranges.into_iter().zip(curs).collect()
+                                })
+                                .collect();
                             let Some(tab) = this.model.active_mut() else {
                                 return Vec::new();
                             };
+                            // Догон подсветки не завершён (бюджет
+                            // 2 мс/кадр, ensure_window == false) —
+                            // просим следующий кадр: прогрессивная
+                            // подсветка добирает окно сама. Без этого
+                            // после РЕЗКОГО прыжка (трекпад-флик)
+                            // текст оставался без цвета до первого
+                            // события мыши — плавный скролл кадры
+                            // даёт, прыжок один (баг ручной проверки).
+                            let mut highlight_pending = false;
                             // Подсветка (5.2): прогрев окна видимых строк
                             // (догон с бюджетом внутри движка); движок
                             // живёт во вкладке — НЕ аллоцируется на кадр.
                             if !reals.is_empty() {
                                 let first = *reals.first().unwrap();
                                 let count = reals.last().unwrap() + 1 - first;
-                                tab.highlight.ensure_window(&tab.doc, first, count);
+                                highlight_pending =
+                                    !tab.highlight.ensure_window(&tab.doc, first, count);
                             }
                             let mut items = Vec::with_capacity(range.len());
-                            // reals уже вычислены (заём this.model — мут).
-                            for real in reals.iter().copied() {
+                            // Ракетка ширины контента (горизонтальный
+                            // скролл): шире виденного — запомнить и
+                            // перерисовать зону с новой шириной.
+                            let mut width_grew = false;
+                            // reals/line_hits уже вычислены (заём this.model — мут).
+                            for (real, hits) in reals.iter().copied().zip(line_hits) {
                                 let content = tab.doc.line_content(real);
                                 let content_len = content.chars().count();
+                                width_grew |= tab.note_line_width(content_len);
                                 let (carets, sel_ranges) =
                                     line_carets(&cursors, &tab.doc, real, content_len);
                                 // Цветовые диапазоны строки (кэш движка;
@@ -255,6 +363,8 @@ impl Workspace {
                                     .map(|spans| spans.as_slice())
                                     .unwrap_or(&[]);
                                 let is_active_line = active_line == Some(real);
+                                // hits — совпадения поиска строки (подготов
+                                // лены выше, до заёма вкладки).
                                 // Шапка CSV на месте (D12.5): real-строка 0
                                 // выделяется фоном; РАМКУ несёт только
                                 // липкий оверлей — здесь АБСОЛЮТНЫЙ 1px-див
@@ -283,11 +393,12 @@ impl Workspace {
                                     .text_size(px(FONT_SIZE))
                                     .font_family(FONT)
                                     .whitespace_nowrap();
-                                for (si, seg) in split_line_styled(
+                                for (si, seg) in split_line_full(
                                     &content,
                                     &carets,
                                     &sel_ranges,
                                     colors,
+                                    &hits,
                                 )
                                 .into_iter()
                                 .enumerate()
@@ -309,6 +420,14 @@ impl Workspace {
                                         let mut seg_div = div().child(seg.text);
                                         if seg.selected {
                                             seg_div = seg_div.bg(rgb(SELECTION));
+                                        } else if seg.search_current {
+                                            // Приоритет фона: выделение &gt;
+                                            // текущее совпадение &gt; совпадение
+                                            // (D13); активная строка — фон row,
+                                            // сегменты поверх неё.
+                                            seg_div = seg_div.bg(rgb(SEARCH_CURRENT));
+                                        } else if seg.search_hit {
+                                            seg_div = seg_div.bg(rgb(SEARCH_MATCH));
                                         }
                                         // Цвет подсветки — тоже на сегменте;
                                         // класс 0/None не задаёт цвет —
@@ -427,19 +546,105 @@ impl Workspace {
                             // кадров по фазам (включён — только при
                             // NOTEPAD_BENCH=1).
                             crate::bench::record_frame(frame_ms);
+                            // Ширина контента выросла ИЛИ подсветка не
+                            // догнала окно — нужен следующий кадр.
+                            // ЛОВУШКА gpui 0.2.2: cx.notify() ИЗ paint
+                            // НЕ ставит window-dirty (invalidate_view
+                            // при draw_phase != None только пишет
+                            // dirty_views, которые читает СЛЕДУЮЩИЙ
+                            // draw — а его без dirty не будет; notify
+                            // терялся и подсветка после прыжка гасла).
+                            // request_animation_frame переносит notify
+                            // на тик frame-callback'а — он исполняется
+                            // ДО проверки is_dirty() и честно ставит
+                            // dirty: самозапуск кадра работает.
+                            if width_grew || highlight_pending {
+                                window.request_animation_frame();
+                            }
                             items
                         },
                     ),
                 )
                 .track_scroll(self.scroll.clone())
+                // Фиксированная ширина контента (горизонтальный
+                // скролл зоны): строки w_full заполняют её целиком —
+                // фоны активной строки/шапки тянутся на всю ширину
+                // прокрутки; min_w_full — короче вьюпорта не бывает.
+                .w(px(content_w))
+                .min_w_full()
                 .h_full(),
+                    )
+                    // Разделение осей колеса (ловушка gpui 0.2.2, баг
+                    // «вертикальное колесо крутит нижнюю полосу»):
+                    // скролл-контейнер с ОДНОЙ осью конвертирует колесо
+                    // другой в свою (div.rs: delta_x = delta.y при
+                    // overflow.y != Scroll; флаг restrict_scroll_to_axis
+                    // без сеттера). Порядок диспетчеризации: слушатели
+                    // регистрируются при paint РОДИТЕЛЯ ДО детей, bubble
+                    // идёт по регистрации В ОБРАТНОМ порядке — значит
+                    // ПОСЛЕДНИЙ ребёнок зоны срабатывает РАНЬШЕ
+                    // внутренних слушателей списка и зоны. Этот
+                    // прозрачный оверлей сам раскладывает дельту по
+                    // осям (editor_mouse::on_editor_wheel) и гасит
+                    // событие — конвертации не происходит вовсе.
+                    // Хитбокс Normal: клики по строкам/гуттеру
+                    // проходят сквозь.
+                    .child(
+                        div()
+                            .id("editor-wheel-guard")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_scroll_wheel(cx.listener(Self::on_editor_wheel)),
+                    ),
+            )
+            // Вертикальная дорожка — сосед зоны (своя полоса, не
+            // поверх текста); wheel над ней тоже через on_editor_wheel.
+            .child(
+                div()
+                    .id("editor-vlane")
+                    .h_full()
+                    .on_scroll_wheel(cx.listener(Self::on_editor_wheel))
+                    .child(
+                        self.render_vertical_scrollbar_lane(
+                            crate::scrollbar::ScrollTarget::Editor,
+                            cx,
+                        ),
+                    ),
+            ),
+            )
+            // Горизонтальная дорожка — под строкой контента; правый
+            // хвост — угловой квадратик (ход ползунка = ширина зоны).
+            .child(
+                div()
+                    .id("editor-hlane")
+                    .on_scroll_wheel(cx.listener(Self::on_editor_wheel))
+                    .child(
+                        self.render_horizontal_scrollbar_lane(
+                            crate::scrollbar::ScrollTarget::EditorHorizontal,
+                            cx,
+                        ),
+                    ),
             );
+        // Полосы прокрутки (scrollbar.rs) — оверлеи краёв редактора:
+        // вертикальная после uniform_list, горизонтальная снизу;
+        // липкая шапка/панель поиска выше по z-order (паттерн
+        // детей-оверлеев).
+        editor = editor.child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Editor, cx));
+        editor = editor.child(self.render_horizontal_scrollbar(crate::scrollbar::ScrollTarget::EditorHorizontal, cx));
         // Липкая шапка (D12.5) — ребёнок контейнера редактора, добавлен
         // ПОСЛЕ uniform_list: рендерится поверх, перекрывает первую
         // видимую строку (нормально для липкой шапки); клики ловит её
         // собственный on_mouse_down + stop_propagation.
         if let Some((content, colors)) = header {
             editor = editor.child(self.render_csv_sticky_header(cx, &content, &colors));
+        }
+        // Панель поиска (6.1, D13): абсолютный оверлей top-right,
+        // постоянная пока открыта; фокус панели — клавиши редактора
+        // не получают (ловушка D9.2), клики стопаются на корне панели.
+        if self.search.is_some() {
+            editor = editor.child(self.render_search_panel(cx));
         }
         editor.into_any_element()
     }
@@ -459,10 +664,15 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         // Текстовая ячейка — структура обычной строки (ловушка
         // gui_tests: пустых сегментов не плодим — caret-разрезов тут
-        // нет, пустые тексты пропускаем).
+        // нет, пустые тексты пропускаем). Горизонтальный скролл:
+        // текст шапки ЕДЕТ вместе со строками (гуттер стоит) —
+        // отрицательный margin на величину прокрутки (render читает
+        // offset прошлого prepaint — ловушка D12.5, шапка догоняет).
+        let scroll_x = -f32::from(self.h_scroll.offset().x).max(0.0);
         let mut text_cell = div()
             .flex()
             .items_center()
+            .ml(px(-scroll_x))
             .text_size(px(FONT_SIZE))
             .font_family(FONT)
             .whitespace_nowrap();
@@ -483,7 +693,9 @@ impl Workspace {
             .absolute()
             .top_0()
             .left_0()
-            .w_full()
+            // Ширина — до вертикальной дорожки (left+right, без
+            // w_full): шапка не наезжает на полосу прокрутки.
+            .right(px(crate::scrollbar::TRACK_W))
             .h(px(LINE_HEIGHT))
             .flex()
             .items_center()

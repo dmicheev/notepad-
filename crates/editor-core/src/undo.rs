@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn undo_restores_original_byte_state() {
         let original = "hello world";
-        let mut doc = Document::from_str(original);
+        let mut doc = Document::from_text(original);
         let mut hist = History::new();
 
         hist.apply(&mut doc, &Transaction::from_edits(vec![Edit::insert(5, " beautiful")]));
@@ -182,7 +182,7 @@ mod tests {
     /// Redo возвращает состояние после правок.
     #[test]
     fn redo_restores_after_undo() {
-        let mut doc = Document::from_str("текст");
+        let mut doc = Document::from_text("текст");
         let mut hist = History::new();
         hist.apply(&mut doc, &Transaction::from_edits(vec![Edit::insert(0, ">> ")]));
         hist.apply(&mut doc, &Transaction::from_edits(vec![Edit::delete(0, 3)]));
@@ -198,12 +198,10 @@ mod tests {
     /// многобайтовые символы — координаты честные char-индексы).
     #[test]
     fn consecutive_typing_forms_single_undo() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
-        let mut caret = 0;
-        for ch in "Привет, мир!".chars() {
+        for (caret, ch) in "Привет, мир!".chars().enumerate() {
             hist.apply(&mut doc, &insert_text(&[Selection::caret(caret)], &ch.to_string()));
-            caret += 1;
         }
         assert_eq!(doc.text(), "Привет, мир!");
 
@@ -219,7 +217,7 @@ mod tests {
     /// на двух каретках отменяются одним undo.
     #[test]
     fn multi_cursor_typing_groups() {
-        let mut doc = Document::from_str("one two");
+        let mut doc = Document::from_text("one two");
         let mut hist = History::new();
         for _ in 0..2 {
             let carets = [Selection::caret(3), Selection::caret(doc.len_chars())];
@@ -233,7 +231,7 @@ mod tests {
     /// Последовательные одиночные backspace — одна группа.
     #[test]
     fn consecutive_backspaces_form_single_undo() {
-        let mut doc = Document::from_str("abcdef");
+        let mut doc = Document::from_text("abcdef");
         let mut hist = History::new();
         for caret in (1..=6).rev() {
             let tx = backspace(doc.len_chars(), &[Selection::caret(caret)]);
@@ -248,7 +246,7 @@ mod tests {
     /// ломавший покоординатное слияние инверсий).
     #[test]
     fn consecutive_forward_deletes_form_single_undo() {
-        let mut doc = Document::from_str("abcdef");
+        let mut doc = Document::from_text("abcdef");
         let mut hist = History::new();
         for _ in 0..3 {
             let tx = forward_delete(doc.len_chars(), &[Selection::caret(0)]);
@@ -265,7 +263,7 @@ mod tests {
     /// один undo восстанавливает порядок символов.
     #[test]
     fn typing_with_caret_back_inside_group_undoes_correctly() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(0)], "a"));
         hist.apply(&mut doc, &insert_text(&[Selection::caret(1)], "b"));
@@ -281,7 +279,7 @@ mod tests {
     /// Правка другого типа разрывает группу: undo снимает сначала её.
     #[test]
     fn different_edit_kind_splits_groups() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(0)], "a"));
         hist.apply(&mut doc, &insert_text(&[Selection::caret(1)], "b"));
@@ -299,7 +297,7 @@ mod tests {
     /// Составная правка (вставка нескольких символов) — своя запись.
     #[test]
     fn multi_char_insert_is_own_undo_step() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(0)], "a"));
         hist.apply(&mut doc, &insert_text(&[Selection::caret(1)], "b"));
@@ -318,7 +316,7 @@ mod tests {
     /// Undo/redo на пустых стеках — no-op (false), документ не меняется.
     #[test]
     fn undo_redo_on_empty_stacks_are_noops() {
-        let mut doc = Document::from_str("текст");
+        let mut doc = Document::from_text("текст");
         let mut hist = History::new();
         assert!(!hist.undo(&mut doc));
         assert!(!hist.redo(&mut doc));
@@ -335,7 +333,7 @@ mod tests {
     /// отменяются одним undo.
     #[test]
     fn multi_cursor_edit_undone_with_single_undo() {
-        let mut doc = Document::from_str("one two three");
+        let mut doc = Document::from_text("one two three");
         let mut hist = History::new();
         let sels = [Selection::caret(3), Selection::caret(7), Selection::caret(13)];
         hist.apply(&mut doc, &insert_text(&sels, ","));
@@ -355,7 +353,7 @@ mod tests {
     /// внутри Document::apply — и при прямых, и при инверсных транзакциях).
     #[test]
     fn bookmarks_and_folds_survive_undo_redo() {
-        let mut doc = Document::from_str("l0\nl1\nl2\nl3\n");
+        let mut doc = Document::from_text("l0\nl1\nl2\nl3\n");
         {
             let meta = doc.line_meta_mut();
             meta.set_bookmark(2);
@@ -381,7 +379,7 @@ mod tests {
     /// Новая правка после undo очищает redo-стек.
     #[test]
     fn new_edit_clears_redo_stack() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(0)], "a"));
         assert!(hist.undo(&mut doc));
@@ -397,7 +395,7 @@ mod tests {
     /// отдельные группы.
     #[test]
     fn group_does_not_span_undo() {
-        let mut doc = Document::from_str("");
+        let mut doc = Document::from_text("");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(0)], "a"));
         assert!(hist.undo(&mut doc));
@@ -413,7 +411,7 @@ mod tests {
     /// состояние после правок.
     #[test]
     fn interleaved_undo_redo_roundtrip() {
-        let mut doc = Document::from_str("one");
+        let mut doc = Document::from_text("one");
         let mut hist = History::new();
         hist.apply(&mut doc, &insert_text(&[Selection::caret(3)], " two"));
         let tx = backspace(doc.len_chars(), &[Selection::caret(7)]);
@@ -435,7 +433,7 @@ mod tests {
     /// историю регистрирует отдельно).
     #[test]
     fn push_after_manual_apply() {
-        let mut doc = Document::from_str("abc");
+        let mut doc = Document::from_text("abc");
         let mut hist = History::new();
         let tx = Transaction::from_edits(vec![Edit::insert(3, "def")]);
         let inv = doc.apply(&tx);

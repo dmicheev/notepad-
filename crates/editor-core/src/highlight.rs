@@ -46,7 +46,10 @@ pub const LINE_CHAR_CAP: usize = 8192;
 pub const CATCH_UP_BUDGET: Duration = Duration::from_millis(2);
 
 /// Шаг чекпоинтов стека (строк).
-const CHECKPOINT_EVERY: usize = 1024;
+/// Шаг чекпоинтов (строк): фон/догон сохраняют состояние разбора
+/// каждые CHECKPOINT_EVERY границ — прыжок рядом с чекпоинтом почти
+/// бесплатен. `pub` — app фильтрует мелкие файлы фонового прохода.
+pub const CHECKPOINT_EVERY: usize = 1024;
 
 /// Потолок кэша спанов; при превышении чистим вне окна ± запас.
 const SPANS_LIMIT: usize = 16384;
@@ -89,10 +92,96 @@ pub struct Span {
 /// Состояние разбора на границе строки `line` (после строк `< line`).
 /// Обе половины обязательны: `ParseState` — контекстный стек grammar,
 /// `ScopeStack` — скоупы для цвета (HighlightLines держит обе, D12.1).
+/// `pub` для фоновой порции (BackgroundChunk); поля приватны.
 #[derive(Debug, Clone)]
-struct LineState {
+pub struct LineState {
     parse: ParseState,
     scopes: ScopeStack,
+}
+
+/// Порция фонового прохода раскраски (см. [`BackgroundWalk`]).
+#[derive(Debug)]
+pub struct BackgroundChunk {
+    /// Спаны разобранных строк порции (старые координаты документа —
+    /// снимок, на котором ходка стартовала).
+    pub spans: Vec<(usize, Arc<Vec<Span>>)>,
+    /// Чекпоинты (граница строки → состояние), кратно
+    /// `CHECKPOINT_EVERY`.
+    pub checkpoints: Vec<(usize, LineState)>,
+    /// Документ пройден до конца.
+    pub done: bool,
+}
+
+/// Фоновый проход раскраски всего документа чекпоинтами: прыжки вглубь
+/// большого файла не должны ждать долгого кадрового догонa — ходка
+/// строит чекпоинты сразу (любой прыжок = ≤ CHECKPOINT_EVERY строк
+/// догонa). Владеет собственным состоянием, работает на КОПИИ rope в
+/// фоновой задаче; порции сливаются в движок потребителем через
+/// [`HighlightEngine::merge_background`] (валидность — по первой
+/// строке правок с момента старта; смена языка — сверкой имени на
+/// стороне потребителя).
+pub struct BackgroundWalk {
+    state: LineState,
+    line: usize,
+}
+
+impl BackgroundWalk {
+    /// Начать от самого дальнего чекпоинта движка (прогресс рендера
+    /// переиспользуется). `None` — синтаксиса нет (Plain Text/порог)
+    /// или CSV (раскраска дешёвая, фон не нужен).
+    pub fn start(engine: &HighlightEngine) -> Option<Self> {
+        let syntax = engine.syntax?;
+        if engine.csv {
+            return None;
+        }
+        let (line, state) = match engine.states.last_key_value() {
+            Some((l, s)) => (*l, s.clone()),
+            None => (0, LineState { parse: ParseState::new(syntax), scopes: ScopeStack::new() }),
+        };
+        Some(BackgroundWalk { state, line })
+    }
+
+    /// Курсор ходки: следующая строка разбора (граница валидности
+    /// `bg_valid_upto`: правка выше курсора ходку перезапускают).
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    /// Разобрать очередную порцию строк в рамках `budget` (не меньше
+    /// одной строки за вызов — сходимость потребителя гарантирована):
+    /// спаны порции + чекпоинты каждых CHECKPOINT_EVERY границ.
+    /// Разбор идентичен ensure_window (parse_line + build_spans; кап
+    /// длины — пустые спаны).
+    pub fn chunk(&mut self, doc: &Document, budget: Duration) -> BackgroundChunk {
+        let total = doc.len_lines();
+        let deadline = Instant::now() + budget;
+        let mut out =
+            BackgroundChunk { spans: Vec::new(), checkpoints: Vec::new(), done: false };
+        while self.line < total {
+            let mut text = doc.line_str(self.line); // с терминатором (кроме хвоста)
+            if !text.ends_with('\n') {
+                text.push('\n'); // ловушка newlines-набора
+            }
+            let spans = if text.chars().count() > LINE_CHAR_CAP + 1 {
+                Vec::new() // кап длины: без цвета, стек проходит насквозь
+            } else {
+                let ops = self.state.parse.parse_line(&text, syntax_set());
+                let empty = Vec::new();
+                let ops = ops.as_ref().unwrap_or(&empty);
+                build_spans(&text, ops, &mut self.state.scopes)
+            };
+            out.spans.push((self.line, Arc::new(spans)));
+            self.line += 1;
+            if self.line.is_multiple_of(CHECKPOINT_EVERY) {
+                out.checkpoints.push((self.line, self.state.clone()));
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        out.done = self.line >= total;
+        out
+    }
 }
 
 /// Движок подсветки одного документа (владелец — `BufferTab`).
@@ -178,8 +267,17 @@ impl HighlightEngine {
     /// real-координаты). Догон к `first` и разбор окна — в рамках
     /// `CATCH_UP_BUDGET`; не догнали — окно без подсветки, продолжим со
     /// следующего кадра (прогрессивная подсветка, без фризов).
-    pub fn ensure_window(&mut self, doc: &Document, first: usize, count: usize) {
-        let Some(_syntax) = self.syntax else { return };
+    ///
+    /// Возвращает `true` — окно покрыто спанами ЦЕЛИКОМ (вызов
+    /// догнал), `false` — бюджет исчерпан, есть хвост работы: рендер
+    /// обязан запросить следующий кадр (иначе после резкого прыжка
+    /// текст без цвета до первого события мыши — баг ручной проверки:
+    /// плавный скролл кадры даёт, прыжок — один кадр). Дедлайн
+    /// проверяется ПОСЛЕ разбора строки: каждый вызов разбирает хотя
+    /// бы одну строку — прогресс гарантирован, notify-цикл рендера
+    /// сходится при любом бюджете.
+    pub fn ensure_window(&mut self, doc: &Document, first: usize, count: usize) -> bool {
+        let Some(_syntax) = self.syntax else { return true };
         let total = doc.len_lines();
         let first = first.min(total.saturating_sub(1));
         let last = (first + count).min(total); // [first, last)
@@ -210,21 +308,23 @@ impl HighlightEngine {
                 line += 1;
                 continue;
             }
+            self.parse_into(doc, line, &mut state);
+            line += 1;
+            if line.is_multiple_of(CHECKPOINT_EVERY) {
+                self.states.insert(line, state.clone());
+            }
             if Instant::now() >= deadline {
                 // Прогресс сохраняем: чекпоинт на текущей границе.
                 self.states.insert(line, state);
                 self.prune_spans(first, last);
-                return;
-            }
-            self.parse_into(doc, line, &mut state);
-            line += 1;
-            if line % CHECKPOINT_EVERY == 0 {
-                self.states.insert(line, state.clone());
+                return false;
             }
         }
 
         // Окно: спаны + стек на каждую строку (стеки окна — быстрая
-        // инвалидация правок, D12.1).
+        // инвалидация правок, D12.1). Дедлайн — ПОСЛЕ разбора: вызов
+        // без прогресса зависил бы notify-цикл рендера (нулевой
+        // бюджет + пустое окно).
         while line < last {
             if self.cached(&line) {
                 if let Some(next) = self.states.get(&(line + 1)) {
@@ -233,12 +333,12 @@ impl HighlightEngine {
                 line += 1;
                 continue;
             }
-            if Instant::now() >= deadline {
-                break;
-            }
             self.parse_into(doc, line, &mut state);
             line += 1;
             self.states.insert(line, state.clone());
+            if Instant::now() >= deadline {
+                break;
+            }
         }
         if line > first {
             self.states.insert(line, state);
@@ -251,12 +351,40 @@ impl HighlightEngine {
             l % CHECKPOINT_EVERY == 0 || (first <= l && l <= last + 1) || Some(l) == restart
         });
         self.prune_spans(first, last);
+        // Окно покрыто? (пустой Vec — тоже покрыт: кап длины строки)
+        (first..last).all(|l| self.spans.contains_key(&l))
     }
 
     /// Строка в кэше (спаны есть) — рендер и повторный проход не
     /// требуют разбора.
     fn cached(&self, line: &usize) -> bool {
         self.spans.contains_key(line)
+    }
+
+    /// Влить фоновую порцию ([`BackgroundWalk`]). `valid_upto` —
+    /// первая строка правок с момента старта ходки: чекпоинт на
+    /// границе L валиден при `L <= valid_upto` (строки < L не
+    /// менялись); спаны строк `>= valid_upto` устарели — кадровый
+    /// ensure_window пересчитает. Чекпоинты вливаются всегда (их
+    /// ~len_lines/1024 — память ничтожна), спаны — под SPANS_LIMIT.
+    /// Видимые строки порции немедленно красят рендер (notify
+    /// делает потребитель).
+    pub fn merge_background(&mut self, chunk: BackgroundChunk, valid_upto: usize) {
+        for (line, spans) in chunk.spans {
+            if line < valid_upto && self.spans.len() < SPANS_LIMIT {
+                self.spans.insert(line, spans);
+            }
+        }
+        for (line, state) in chunk.checkpoints {
+            if line <= valid_upto {
+                self.states.insert(line, state);
+            }
+        }
+    }
+
+    /// Чекпоинт-границы движка (тесты фонового прохода/прыжков).
+    pub fn checkpoint_lines(&self) -> Vec<usize> {
+        self.states.keys().copied().collect()
     }
 
     /// Почистить кэш спанов вне окна ± запас (потолок SPANS_LIMIT —
@@ -490,7 +618,7 @@ mod tests {
     }
 
     fn doc(s: &str) -> Document {
-        Document::from_str(s)
+        Document::from_text(s)
     }
 
     fn classes(e: &HighlightEngine, _doc: &Document, line: usize) -> Vec<(u32, u32, u8)> {
@@ -571,32 +699,101 @@ mod tests {
         // …и тот же файл с чистого движка окном [4..6) (прыжок):
         let mut e2 = engine_for("rs");
         e2.ensure_window(&d, 4, 2);
-        for l in 4..6 {
-            assert_eq!(classes(&e2, &d, l), sequential[l], "line {l}");
+        for (l, expected) in sequential.iter().enumerate().take(6).skip(4) {
+            assert_eq!(classes(&e2, &d, l), *expected, "line {l}");
         }
     }
 
     /// Догон с бюджетом: большой прыжок не закрывает окно за один вызов,
-    /// но ДОГОНЯЕТ за несколько (прогрессивная подсветка).
+    /// но ДОГОНЯЕТ за несколько (прогрессивная подсветка). Возврат
+    /// `ensure_window`: false пока окно не покрыто, true в конце —
+    /// по нему рендер гоняет кадры догонa (баг «прыжок гасит цвет»).
     #[test]
     fn catchup_progresses_over_calls() {
         let mut e = engine_for("rs");
         // ~40 строк короткого rust-кода
         let text: String = (0..40).map(|i| format!("fn f{i}(x: u64) -> u64 {{ x + {i} }}\n")).collect();
         let d = doc(&text);
-        // Крошечный бюджет: сначала без спанов, за N вызовов — догон.
-        // (Смоделировать медленный разбор нельзя — проверяем механику:
-        // окно далеко от начала догоняется за конечное число вызовов.)
+        // Нулевой бюджет: каждый вызов — минимум строк, окно далеко от
+        // начала НЕ закрывается за один вызов (механика догонa).
+        e.set_budget(Duration::ZERO);
+        let mut saw_pending = false;
         let mut calls = 0;
         loop {
-            e.ensure_window(&d, 35, 5);
-            if e.spans(35).is_some() || calls > 1000 {
+            let complete = e.ensure_window(&d, 35, 5);
+            if complete || calls > 1000 {
+                assert!(complete, "окно покрыто — ensure_window == true (calls={calls})");
                 break;
             }
+            saw_pending = true;
             calls += 1;
         }
+        assert!(saw_pending, "нулевого бюджета не хватало хотя бы на один вызов");
         assert!(e.spans(35).is_some(), "caught up in {calls} calls");
         assert!(classes(&e, &d, 35).iter().any(|(_, _, c)| *c == CLASS_KEYWORD));
+    }
+
+    /// Нулевой бюджет не зависает: каждый вызов разбирает хотя бы одну
+    /// строку (дедлайн ПОСЛЕ разбора) — notify-цикл рендера сходится.
+    #[test]
+    fn zero_budget_still_progresses() {
+        let mut e = engine_for("rs");
+        e.set_budget(Duration::ZERO);
+        let text: String = (0..30).map(|i| format!("fn g{i}() {{ {i} }}\n")).collect();
+        let d = doc(&text);
+        let mut calls = 0;
+        while !e.ensure_window(&d, 25, 5) {
+            calls += 1;
+            assert!(calls < 100, "нулевого бюджета хватает на {calls}+ вызовов?");
+        }
+        assert!(e.spans(25).is_some(), "окно в итоге покрыто за {calls} вызовов");
+    }
+
+    /// Фоновая ходка строит чекпоинты по всему файлу; после слияния
+    /// прыжок вглубь закрывается ОДНИМ ensure_window (догон ≤
+    /// CHECKPOINT_EVERY строк — кадры рендера больше не гоняют
+    /// длинные догонs).
+    #[test]
+    fn background_walk_checkpoints_make_jumps_cheap() {
+        let mut e = engine_for("rs");
+        let text: String = (0..3000).map(|i| format!("fn f{i}(x: u64) -> u64 {{ x + {i} }}\n")).collect();
+        let d = doc(&text);
+        // Небольшой прогрев начала (как рендер первого экрана).
+        e.set_budget(Duration::from_secs(1));
+        e.ensure_window(&d, 0, 10);
+        // Ходка от дальнего чекпоинта до конца файла.
+        let mut w = BackgroundWalk::start(&e).expect("синтаксис есть");
+        loop {
+            let chunk = w.chunk(&d, Duration::from_secs(10));
+            let done = chunk.done;
+            e.merge_background(chunk, usize::MAX);
+            if done {
+                break;
+            }
+        }
+        let cps = e.checkpoint_lines();
+        assert!(cps.contains(&1024) && cps.contains(&2048), "чекпоинты: {cps:?}");
+        // Прыжок на 2500: догон от чекпоинта 2048 — 452 строки,
+        // один вызов с дефолтным бюджетом заведомо покрывает.
+        e.set_budget(CATCH_UP_BUDGET);
+        let complete = e.ensure_window(&d, 2500, 40);
+        assert!(complete, "прыжок вглубь закрыт одним вызовом (чекпоинты)");
+    }
+
+    /// Слияние фоновой порции уважает правки: чекпоинты/спаны после
+    /// первой строки правок (valid_upto) не вливаются.
+    #[test]
+    fn background_merge_respects_edits() {
+        let mut e = engine_for("rs");
+        let text: String = (0..2100).map(|i| format!("let v{i} = {i};\n")).collect();
+        let d = doc(&text);
+        let mut w = BackgroundWalk::start(&e).expect("синтаксис есть");
+        let chunk = w.chunk(&d, Duration::from_secs(10));
+        assert!(chunk.done, "2100 строк за один большой бюджет");
+        // Правка на строке 5: всё, что глубже, невалидно.
+        e.merge_background(chunk, 5);
+        assert!(!e.checkpoint_lines().contains(&1024), "чекпоинт за правкой не влит");
+        assert!(e.spans(500).is_none(), "спаны за правкой не влиты");
     }
 
     /// Инвалидация правки: спаны до строки правки живут, после — нет;
@@ -866,7 +1063,7 @@ mod tests {
         let doc_text: String = (0..290_000)
             .map(|n| format!("{:6}    call_{n:06}(arg1, arg2) {{ if (deep) {{ trace(); }} }}\n", n % 9 * 4))
             .collect();
-        let d = Document::from_str(&doc_text);
+        let d = Document::from_text(&doc_text);
         let syntax = detect_by_extension("rs").unwrap();
 
         // Первый parse — компиляция regex'ов синтаксиса (onig OnceCell).
@@ -920,7 +1117,7 @@ mod tests {
             ops.len()
         );
         // Через движок (кап): мгновенно, спанов нет.
-        let dh = Document::from_str(&huge);
+        let dh = Document::from_text(&huge);
         let mut eh = HighlightEngine::new();
         eh.set_syntax(Some(syntax));
         let t = Instant::now();
@@ -928,7 +1125,7 @@ mod tests {
         println!("1MB single line via engine (cap): {:.3} ms (spans: {:?})", t.elapsed().as_secs_f64() * 1000.0, eh.spans(0).map(|s| s.len()));
         // Кап 8 КБ для сравнения.
         let capped = "let x = \"".to_string() + &"a".repeat(LINE_CHAR_CAP) + "\";\n";
-        let dc = Document::from_str(&capped);
+        let dc = Document::from_text(&capped);
         let mut ec = HighlightEngine::new();
         ec.set_syntax(Some(syntax));
         let t = Instant::now();

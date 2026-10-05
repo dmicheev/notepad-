@@ -47,6 +47,27 @@ pub(crate) const SYN_COL_D: u32 = 0xd7ba7d; // колонки 3, 7, … (зол�
 pub(crate) const CSV_HEADER_BG: u32 = 0x252526; // фон заголовка (как PANEL)
 pub(crate) const CSV_HEADER_BORDER: u32 = 0x007acc; // линия-рамка (акцент)
 
+// Поиск и замена (группа 6, D13): подсветка совпадений в рендере —
+// отдельные цвета от SELECTION (оранжевое семейство Dark+); текущее
+// совпадение ярче. Ошибка regex в панели — красный.
+pub(crate) const SEARCH_MATCH: u32 = 0x9e6a03; // все совпадения (янтарный)
+pub(crate) const SEARCH_CURRENT: u32 = 0xd78a12; // текущее совпадение
+pub(crate) const SEARCH_ERROR: u32 = 0xf14c4c; // ошибка паттерна
+
+/// Ховер кликабельных зон (язык в статус-баре, чипы панели поиска).
+pub(crate) const STATUS_LANG_HOVER: u32 = 0x3d9be8;
+
+// Полосы прокрутки (overlay, scrollbar.rs): тёмный ползунок Dark+,
+// при ховере — светлее; дорожка без фона (не спорит с контентом).
+pub(crate) const SCROLLBAR_THUMB: u32 = 0x4a4a4c;
+pub(crate) const SCROLLBAR_THUMB_HOVER: u32 = 0x636366;
+
+// Отдельные дорожки полос редактора (scrollbar.rs, lane-режим):
+// чуть темнее фона редактора + линия у текста — полоса читается как
+// своя зона, ползунок не накладывается на текст.
+pub(crate) const SCROLLBAR_TRACK: u32 = 0x1a1a1b;
+pub(crate) const SCROLLBAR_TRACK_BORDER: u32 = 0x2d2d2d;
+
 /// Цвет класса подсветки (editor_core::highlight::StyleClass).
 pub(crate) fn syntax_color(class: u8) -> u32 {
     match class {

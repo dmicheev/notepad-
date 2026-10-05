@@ -35,7 +35,10 @@ impl Document {
         Document { rope: Rope::new(), meta: LineMeta::with_lines(1), format: FileFormat::default() }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    /// Документ из текста (UTF-8, кодировка/переводы — дефолт).
+    /// Не `from_str`: имя конфликтует с конвенцией `FromStr::from_str`
+    /// (clippy::should_implement_trait).
+    pub fn from_text(s: &str) -> Self {
         let rope = Rope::from_str(s);
         let lines = rope.len_lines();
         Document { rope, meta: LineMeta::with_lines(lines), format: FileFormat::default() }
@@ -160,7 +163,7 @@ mod tests {
     /// Задача 2.1: вставки и удаления в начале, середине, конце rope.
     #[test]
     fn insert_delete_at_start_middle_end() {
-        let mut doc = Document::from_str("alpha beta gamma");
+        let mut doc = Document::from_text("alpha beta gamma");
         // Начало.
         doc.apply(&Transaction::from_edits(vec![Edit::insert(0, ">> ")]));
         assert_eq!(doc.text(), ">> alpha beta gamma");
@@ -183,7 +186,7 @@ mod tests {
     /// Позиции правок внутри одной транзакции — до-транзакционные.
     #[test]
     fn multi_edit_positions_are_pre_transaction() {
-        let mut doc = Document::from_str("abcdef");
+        let mut doc = Document::from_text("abcdef");
         let tx = Transaction::from_edits(vec![
             Edit::insert(0, "X"),
             Edit::delete(2, 3),
@@ -197,7 +200,7 @@ mod tests {
     #[test]
     fn apply_returns_working_inverse() {
         let original = "hello world";
-        let mut doc = Document::from_str(original);
+        let mut doc = Document::from_text(original);
         let tx = Transaction::from_edits(vec![
             Edit::insert(5, " beautiful"),
             Edit::delete(0, 1),
@@ -210,7 +213,7 @@ mod tests {
 
     #[test]
     fn line_reads() {
-        let doc = Document::from_str("one\ntwo\nthree\n");
+        let doc = Document::from_text("one\ntwo\nthree\n");
         assert_eq!(doc.len_lines(), 4);
         assert_eq!(doc.line_content(0), "one");
         assert_eq!(doc.line_content(1), "two");

@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn insert_text_on_three_carets() {
         let sels = vec![Selection::caret(3), Selection::caret(7), Selection::caret(13)];
-        let mut doc = crate::document::Document::from_str("one two three");
+        let mut doc = crate::document::Document::from_text("one two three");
         let tx = insert_text(&sels, ",");
         let inverse = doc.apply(&tx);
         assert_eq!(doc.text(), "one, two, three,");
@@ -118,7 +118,7 @@ mod tests {
         // Ввод поверх выделений: каждое слово заменяется на "X".
         let sels =
             vec![Selection::range(0, 3), Selection::range(4, 7), Selection::range(8, 13)];
-        let mut doc = crate::document::Document::from_str("one two three");
+        let mut doc = crate::document::Document::from_text("one two three");
         let tx = insert_text(&sels, "X");
         doc.apply(&tx);
         assert_eq!(doc.text(), "X X X");
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn backspace_on_carets_and_ranges() {
-        let mut doc = crate::document::Document::from_str("abcdef");
+        let mut doc = crate::document::Document::from_text("abcdef");
         // Каретки в 1 и 5 (удаляют 'a' и 'e'), диапазон [3..4) (удаляет 'd').
         let sels = vec![Selection::caret(1), Selection::range(3, 4), Selection::caret(5)];
         let tx = backspace(doc.len_chars(), &sels);
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn forward_delete_on_carets_and_ranges() {
-        let mut doc = crate::document::Document::from_str("abcdef");
+        let mut doc = crate::document::Document::from_text("abcdef");
         // Каретка в 0 (удаляет 'a'), диапазон [2..4) (удаляет "cd"),
         // каретка в 6 — конец документа, no-op.
         let sels = vec![Selection::caret(0), Selection::range(2, 4), Selection::caret(6)];
@@ -198,7 +198,7 @@ mod tests {
         let sels = vec![Selection::range(0, 5), Selection::range(3, 8)];
         let tx = insert_text(&sels, "X");
         assert_eq!(tx.edits().len(), 1);
-        let mut doc = crate::document::Document::from_str("abcdefghij");
+        let mut doc = crate::document::Document::from_text("abcdefghij");
         doc.apply(&tx);
         assert_eq!(doc.text(), "Xfghij");
     }
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn reversed_selection_semantics() {
         let sel = Selection::range(7, 3);
-        let mut doc = crate::document::Document::from_str("abcdefg");
+        let mut doc = crate::document::Document::from_text("abcdefg");
         let tx = insert_text(&[sel], "XY");
         doc.apply(&tx);
         assert_eq!(doc.text(), "abcXY");

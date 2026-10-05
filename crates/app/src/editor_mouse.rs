@@ -7,7 +7,7 @@
 //! click не срабатывает при драге между элементами, up обязан
 //! прилетать и вне строк.
 
-use gpui::{Context, Window};
+use gpui::{Context, Window, point};
 
 use crate::workspace::Workspace;
 
@@ -35,6 +35,36 @@ impl Workspace {
     pub(crate) fn mouse_debug() -> bool {
         static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *DEBUG.get_or_init(|| std::env::var("NOTEPAD_DEBUG_MOUSE").is_ok())
+    }
+
+    /// Wheel редактора с разделением осей (ловушка gpui 0.2.2):
+    /// скролл-контейнер с ОДНОЙ осью конвертирует колесо другой оси в
+    /// свою (зона с overflow-x превратила бы вертикальное колесо в
+    /// горизонтальный скролл; список — горизонтальное в вертикальный).
+    /// Здесь дельта раскладывается по осям вручную (формулы внутренне
+    /// го слушателя gpui: offset += delta; клампы делает prepaint) и
+    /// событие гасится. Вызывают: guard-оверлей зоны (срабатывает
+    /// раньше внутренних слушателей — см. комментарий в editor_view)
+    /// и дорожки полос (вне зоны — guard их не покрывает).
+    pub(crate) fn on_editor_wheel(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let d = event.delta.pixel_delta(window.line_height());
+        if Self::mouse_debug() {
+            eprintln!("[wheel] dx={:.1} dy={:.1}", f32::from(d.x), f32::from(d.y));
+        }
+        // Вертикаль — в uniform_list (общий Rc offset с interactivity),
+        // горизонталь — в зону; поперечные компоненты сохраняются.
+        let v = self.scroll.0.borrow().base_handle.clone();
+        let vo = v.offset();
+        v.set_offset(point(vo.x, vo.y + d.y));
+        let ho = self.h_scroll.offset();
+        self.h_scroll.set_offset(point(ho.x + d.x, ho.y));
+        cx.notify();
+        cx.stop_propagation();
     }
 
     /// (real-строка, колонка) из позиции мыши в окне.
@@ -128,6 +158,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Драг ползунка полосы прокрутки — раньше выделения (полоса —
+        // сосед uniform_list, её move/up приходят сюда же).
+        if self.on_scrollbar_drag_move(event, window, cx) {
+            return;
+        }
         let Some(mut drag) = self.drag else { return };
         let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
             return;
@@ -161,6 +196,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Завершение драга ползунка — раньше выделения.
+        if self.on_scrollbar_drag_up(event, window, cx) {
+            return;
+        }
         let Some(mut drag) = self.drag.take() else { return };
         // Голову драга уточняем фактической позицией отпускания, если
         // move-события её догнали (иначе — последняя известная).
