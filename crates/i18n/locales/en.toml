@@ -39,6 +39,8 @@ choose_language = "Choose Language…"
 split_editor = "Split Editor"
 close_pane = "Close Pane"
 sync_scroll = "Synchronize Scrolling"
+markdown_preview = "Markdown Preview"
+toolbar = "Toolbar"
 font = "Font…"
 fold_all = "Fold All"
 unfold_all = "Unfold All"
@@ -76,6 +78,8 @@ open_failed = "Could not open {file}: {err}"
 save_failed = "Save failed: {err}"
 sync_scroll_on = "Synchronized scrolling on"
 sync_scroll_off = "Synchronized scrolling off"
+preview_on = "Markdown preview on"
+preview_off = "Markdown preview off"
 workspace_open_failed = "Could not open workspace {path}: {err}"
 watch_unavailable = "File watching unavailable: {err}"
 no_workspace = "No workspace open (Cmd+Shift+O to open)"
@@ -179,6 +183,8 @@ ctx_delete = "Delete"
 [shortcuts]
 title = "Keyboard Shortcuts"
 hint = "Esc — close"
+search_placeholder = "Search shortcuts…"
+no_matches = "No matching shortcuts"
 
 [shortcuts.section]
 file = "File"
@@ -222,4 +228,14 @@ tree_new_file = "New file in workspace tree"
 tree_new_folder = "New folder in workspace tree"
 tree_rename = "Rename tree item"
 tree_delete = "Delete tree item"
+markdown_preview = "Markdown preview"
+toolbar = "Toolbar"
+
+[preview]
+placeholder = "Open a Markdown file to see the preview"
+image = "Image: {alt}"
+
+[toolbar]
+text = "Text Operations"
+theme = "Theme"
 

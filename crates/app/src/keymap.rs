@@ -43,6 +43,7 @@ pub(crate) enum KeyAction {
     DeleteNode,
     FoldAll,
     UnfoldAll,
+    ToggleMarkdownPreview,
 }
 
 /// Одна запись раскладки: сочетание + действие + секция/подпись для
@@ -98,6 +99,8 @@ pub(crate) const KEYMAP: &[KeyDef] = &[
     // Свёртывание
     KeyDef { key: "cmd-alt-[", action: KeyAction::FoldAll, section: "view", label: "menu.view.fold_all" },
     KeyDef { key: "cmd-alt-]", action: KeyAction::UnfoldAll, section: "view", label: "menu.view.unfold_all" },
+    // Предпросмотр Markdown (markdown-preview)
+    KeyDef { key: "cmd-shift-v", action: KeyAction::ToggleMarkdownPreview, section: "view", label: "shortcuts.action.markdown_preview" },
 ];
 
 /// Забиндить всю раскладку (main при старте; KEYMAP — единственный
@@ -137,6 +140,9 @@ pub(crate) fn bind_all(cx: &mut App) {
             KeyAction::DeleteNode => KeyBinding::new(def.key, DeleteNode, None),
             KeyAction::FoldAll => KeyBinding::new(def.key, FoldAll, None),
             KeyAction::UnfoldAll => KeyBinding::new(def.key, UnfoldAll, None),
+            KeyAction::ToggleMarkdownPreview => {
+                KeyBinding::new(def.key, ToggleMarkdownPreview, None)
+            }
         };
         bindings.push(binding);
     }
@@ -160,22 +166,62 @@ pub(crate) fn pretty_key(key: &str) -> String {
 }
 
 impl crate::workspace::Workspace {
-    /// Оверлей-справочник сочетаний (8.5): секции KEYMAP с подписями
-    /// i18n; Esc/клик по подложке — закрыть.
+    /// Ввод поиска справочника (toolbar-and-shortcuts 4.2): фильтрация
+    /// по названию действия и клавише; Esc — закрыть.
+    pub(crate) fn handle_shortcuts_search_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if crate::overlay_input::feed(&mut self.shortcuts_query, event, 64, |c| !c.is_control())
+            == crate::overlay_input::InputKey::Cancel
+        {
+            self.shortcuts_open = false;
+            window.focus(&self.active_focus());
+        }
+        cx.notify();
+    }
+
+    /// Справочник сочетаний (8.5 + toolbar-and-shortcuts 4.1):
+    /// центрированное модальное окно с поиском; Esc/подложка — закрыть.
     pub(crate) fn render_shortcuts_overlay(
         &self,
         cx: &gpui::Context<Self>,
     ) -> gpui::AnyElement {
         use gpui::prelude::*;
         let t = |k: &str| crate::i18n::t(cx, k);
-        let mut list = gpui::div().flex().flex_col();
-        // Секции в порядке первого появления (KEYMAP сгруппирован).
+        let query = self.shortcuts_query.trim().to_lowercase();
+        // Фильтр: название действия или клавиша (без учёта регистра).
+        let matches_query = |def: &KeyDef| {
+            query.is_empty()
+                || t(def.label).to_lowercase().contains(&query)
+                || pretty_key(def.key).to_lowercase().contains(&query)
+        };
         let mut sections: Vec<(&str, Vec<&KeyDef>)> = Vec::new();
+        let mut total = 0usize;
         for def in KEYMAP {
+            if !matches_query(def) {
+                continue;
+            }
+            total += 1;
             match sections.iter_mut().find(|(s, _)| *s == def.section) {
                 Some((_, defs)) => defs.push(def),
                 None => sections.push((def.section, vec![def])),
             }
+        }
+        let mut list = gpui::div().flex().flex_col();
+        if total == 0 {
+            list = list.child(
+                gpui::div()
+                    .id("shortcuts-no-matches")
+                    .debug_selector(|| "shortcuts-no-matches".to_string())
+                    .px_3()
+                    .py_6()
+                    .text_size(gpui::px(12.0))
+                    .text_color(gpui::rgb(crate::theme::current().dim))
+                    .child(t("shortcuts.no_matches")),
+            );
         }
         for (section, defs) in sections {
             list = list.child(
@@ -205,12 +251,17 @@ impl crate::workspace::Workspace {
                 );
             }
         }
+        // Центрирование: подложка на всё окно + flex-центр (4.1);
+        // окно ~560 px, max_h ~70% типичного окна.
         gpui::div()
             .id("shortcuts-underlay")
             .absolute()
             .top_0()
             .left_0()
             .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
             .bg(gpui::black().opacity(0.2))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -223,11 +274,8 @@ impl crate::workspace::Workspace {
                 gpui::div()
                     .id("shortcuts-overlay")
                     .debug_selector(|| "shortcuts-overlay".to_string())
-                    .absolute()
-                    .top(gpui::px(60.0))
-                    .left(gpui::px(340.0))
-                    .w(gpui::px(380.0))
-                    .max_h(gpui::px(520.0))
+                    .w(gpui::px(560.0))
+                    .max_h(gpui::px(480.0))
                     .flex()
                     .flex_col()
                     .pb_2()
@@ -241,16 +289,13 @@ impl crate::workspace::Workspace {
                         |_, _, cx| cx.stop_propagation(),
                     )
                     .track_focus(&self.shortcuts_focus)
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
-                        if event.keystroke.key == "escape" {
-                            this.shortcuts_open = false;
-                            cx.notify();
-                        }
-                    }))
+                    .on_key_down(cx.listener(Self::handle_shortcuts_search_key))
                     .child(
                         gpui::div()
                             .flex()
+                            .items_center()
                             .justify_between()
+                            .gap_3()
                             .px_3()
                             .py_2()
                             .text_size(gpui::px(12.0))
@@ -258,6 +303,48 @@ impl crate::workspace::Workspace {
                             .text_color(gpui::rgb(crate::theme::current().dim))
                             .child(gpui::div().child(t("shortcuts.title")))
                             .child(gpui::div().child(t("shortcuts.hint"))),
+                    )
+                    // Поле поиска (4.2): паттерн фокуса goto_dialog.
+                    .child(
+                        gpui::div()
+                            .id("shortcuts-search")
+                            .debug_selector(|| "shortcuts-search".to_string())
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .mx_3()
+                            .my_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(gpui::rgb(crate::theme::current().bg))
+                            .border_1()
+                            .border_color(gpui::rgb(crate::theme::current().close_hover))
+                            .text_size(gpui::px(12.0))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_this, _e, window, _cx| {
+                                    window.focus(&_this.shortcuts_focus);
+                                }),
+                            )
+                            .child(
+                                gpui::div()
+                                    .text_color(gpui::rgb(crate::theme::current().dim))
+                                    .child("⌕"),
+                            )
+                            .child(
+                                gpui::div().flex_1().text_color(gpui::rgb(
+                                    if self.shortcuts_query.is_empty() {
+                                        crate::theme::current().dim
+                                    } else {
+                                        crate::theme::current().text
+                                    },
+                                )).child(if self.shortcuts_query.is_empty() {
+                                    t("shortcuts.search_placeholder")
+                                } else {
+                                    self.shortcuts_query.clone()
+                                }),
+                            ),
                     )
                     .child(
                         list.id("shortcuts-list")

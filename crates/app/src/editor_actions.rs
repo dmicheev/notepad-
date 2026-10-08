@@ -57,7 +57,7 @@ impl Workspace {
             }
         }
         if let Some(msg) = first_error {
-            self.status_message = Some(msg);
+            self.set_status_message(msg, cx);
         }
         // Порог подсветки: спросить про новые крупные файлы.
         let over: Vec<usize> = opened
@@ -127,11 +127,14 @@ impl Workspace {
                 this.update(cx, |ws, cx| {
                     if let Some(tab) = ws.model_mut().active_mut()
                         && let Err(e) = tab.save_to(&path) {
-                            ws.status_message = Some(crate::i18n::tf(
+                            ws.set_status_message(
+                                crate::i18n::tf(
+                                    cx,
+                                    "status.save_failed",
+                                    &[("err", &e.to_string())],
+                                ),
                                 cx,
-                                "status.save_failed",
-                                &[("err", &e.to_string())],
-                            ));
+                            );
                         }
                     cx.notify();
                 })
@@ -163,6 +166,10 @@ impl Workspace {
             .get(pi)
             .and_then(|p| p.model.tabs().get(index))
             .is_some_and(|t| t.dirty);
+        // Метки закрываемой вкладки — в .settings ДО закрытия (после
+        // закрытия состояние вкладки недоступно; запись merge — метки
+        // переживают закрытие файла).
+        self.persist_workspace_marks();
         if !dirty {
             if let Some(pane) = self.panes.get_mut(pi) {
                 pane.model.close(index);
@@ -226,7 +233,7 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            Some(Err(e)) => self.status_message = Some(format!("Save failed: {e}")),
+            Some(Err(e)) => self.set_status_message(format!("Save failed: {e}"), cx),
             None => {}
         }
     }
@@ -341,6 +348,9 @@ impl Workspace {
     ) {
         self.shortcuts_open = !self.shortcuts_open;
         if self.shortcuts_open {
+            // toolbar-and-shortcuts 4.2: поиск сбрасывается при каждом
+            // открытии (свежий список).
+            self.shortcuts_query.clear();
             let f = self.shortcuts_focus.clone();
             window.focus(&f);
         } else {
@@ -465,6 +475,7 @@ impl Workspace {
     /// Cmd+F2: toggle закладки на строке главной каретки.
     pub(crate) fn on_toggle_bookmark(&mut self, _: &ToggleBookmark, _window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.toggle_bookmark_on_primary(), cx);
+        self.persist_workspace_marks();
     }
 
     /// F2: следующая закладка по кругу (+ скролл к ней).
@@ -490,6 +501,7 @@ impl Workspace {
     /// Клик по маркеру закладки в гуттере строки.
     pub(crate) fn toggle_bookmark_at(&mut self, line: usize, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.toggle_bookmark_at(line), cx);
+        self.persist_workspace_marks();
     }
 
     /// Клик по записи в панели закладок: каретка на строку + скролл.
@@ -506,16 +518,19 @@ impl Workspace {
     /// Клик по маркеру свёртывания в гуттере.
     pub(crate) fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.toggle_fold(line), cx);
+        self.persist_workspace_marks();
     }
 
     /// «Свернуть всё» (меню View; без горячей клавиши — 8.5).
     pub(crate) fn on_fold_all(&mut self, _: &FoldAll, _window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.fold_all(), cx);
+        self.persist_workspace_marks();
     }
 
     /// «Развернуть всё» (меню View).
     pub(crate) fn on_unfold_all(&mut self, _: &UnfoldAll, _window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.unfold_all(), cx);
+        self.persist_workspace_marks();
     }
 
     // ---- Операции со строками (4.6): точки запуска — меню Text,

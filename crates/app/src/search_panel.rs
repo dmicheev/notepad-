@@ -339,7 +339,7 @@ impl Workspace {
     /// Полный пересчёт совпадений активной вкладки (File scope):
     /// смена запроса/опций/вкладки, undo/redo. Ошибка regex — в панель
     /// и статус-бар.
-    pub(crate) fn search_recompute_file(&mut self, cx: &gpui::App) {
+    pub(crate) fn search_recompute_file(&mut self, cx: &gpui::Context<Self>) {
         let Some(sp) = self.search.as_mut() else { return };
         if sp.scope != SearchScope::File {
             return;
@@ -362,7 +362,8 @@ impl Workspace {
         sp.version = tab.view_version();
         search_update_current(sp, tab);
         if let Some(err) = sp.error.clone() {
-            self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &err)]));
+            let msg = crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &err)]);
+            self.set_status_message(msg, cx);
         }
     }
 
@@ -547,11 +548,11 @@ impl Workspace {
             SearchOwner::Path { path, .. } => match self.model_mut().open_path(path) {
                 Ok(ix) => ix,
                 Err(e) => {
-                    self.status_message = Some(crate::i18n::tf(
+                    self.set_status_message(crate::i18n::tf(
                         cx,
                         "status.open_failed",
                         &[("file", &path.display().to_string()), ("err", &e.to_string())],
-                    ));
+                    ), cx);
                     cx.notify();
                     return;
                 }

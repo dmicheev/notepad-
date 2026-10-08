@@ -17,6 +17,7 @@ mod goto_dialog;
 mod i18n;
 mod keymap;
 mod language;
+mod markdown_preview;
 mod menus;
 mod language_dialog;
 mod overlay_input;
@@ -32,8 +33,11 @@ mod status_bar;
 mod tab_bar;
 mod tab_model;
 mod theme;
+mod toolbar;
+mod icons;
 mod tree_panel;
 mod workspace;
+mod workspace_settings;
 
 #[cfg(test)]
 mod gui_tests;
@@ -51,7 +55,7 @@ use crate::workspace::Workspace;
 
 fn main() {
     bench::enable_from_env();
-    let app = Application::new();
+    let app = Application::new().with_assets(crate::icons::EmbeddedAssets);
     // macOS: клик по иконке в доке при закрытом окне открывает окно
     // заново с восстановлением сессии (приложение не завершается
     // закрытием последнего окна — D8.4).
@@ -152,6 +156,11 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                     if let Some(kind) = state.as_ref().and_then(|s| s.theme.as_deref()) {
                         ws.theme_kind = crate::theme::ThemeKind::parse(kind);
                     }
+                    // Тулбар из сессии (toolbar-and-shortcuts);
+                    // старые сессии без поля — виден (default true).
+                    if let Some(visible) = state.as_ref().and_then(|s| s.toolbar_visible) {
+                        ws.toolbar_visible = visible;
+                    }
                     // Шрифт из сессии (8.3).
                     let font_ok = |f: &session::FontSettings| {
                         f.size.is_finite()
@@ -221,7 +230,7 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
                         ws.open_workspace_folder(&root, cx);
                     }
                     if let Some(m) = status.take() {
-                        ws.status_message = Some(m);
+                        ws.set_status_message(m, cx);
                     }
                     // Бенчмарк 4.1: NOTEPAD_OPEN=<path> открывает файл при
                     // старте без диалога (ошибка — только в stderr). В режиме
@@ -257,7 +266,7 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>) {
             // приложение продолжает жить (dock-reopen откроет окно).
             let entity = cx.entity();
             window.on_window_should_close(cx, move |window, cx| {
-                entity.read(cx).persist(window);
+                let _ = entity.update(cx, |ws, _| ws.persist(window));
                 true
             });
             // Бенчмарк-стенд (D11.1): async-драйвер скролла/ввода/undo

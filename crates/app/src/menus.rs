@@ -62,6 +62,8 @@ pub(crate) fn build(cx: &gpui::App) -> Vec<Menu> {
                 MenuItem::action(t("menu.view.split_editor"), SplitEditor),
                 MenuItem::action(t("menu.view.close_pane"), ClosePane),
                 MenuItem::action(t("menu.view.sync_scroll"), ToggleSyncScroll),
+                MenuItem::action(t("menu.view.markdown_preview"), ToggleMarkdownPreview),
+                MenuItem::action(t("menu.view.toolbar"), ToggleToolbar),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu {
                     name: t("menu.name.theme").into(),

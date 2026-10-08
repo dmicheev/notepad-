@@ -22,6 +22,10 @@ pub struct Document {
     /// Формат файла (кодировка + переводы строк); запоминается при
     /// загрузке и используется при сохранении — см. design.md D2.5.
     format: FileFormat,
+    /// Ревизия (markdown-preview D4): растёт на каждую применённую
+    /// транзакцию (включая undo/redo — они тоже транзакции). Дешёвый
+    /// ключ кэшей, зависящих от содержимого (предпросмотр Markdown).
+    revision: u64,
 }
 
 impl Default for Document {
@@ -32,7 +36,7 @@ impl Default for Document {
 
 impl Document {
     pub fn new() -> Self {
-        Document { rope: Rope::new(), meta: LineMeta::with_lines(1), format: FileFormat::default() }
+        Document { rope: Rope::new(), meta: LineMeta::with_lines(1), format: FileFormat::default(), revision: 0 }
     }
 
     /// Документ из текста (UTF-8, кодировка/переводы — дефолт).
@@ -41,12 +45,12 @@ impl Document {
     pub fn from_text(s: &str) -> Self {
         let rope = Rope::from_str(s);
         let lines = rope.len_lines();
-        Document { rope, meta: LineMeta::with_lines(lines), format: FileFormat::default() }
+        Document { rope, meta: LineMeta::with_lines(lines), format: FileFormat::default(), revision: 0 }
     }
 
     pub fn from_rope(rope: Rope) -> Self {
         let lines = rope.len_lines();
-        Document { rope, meta: LineMeta::with_lines(lines), format: FileFormat::default() }
+        Document { rope, meta: LineMeta::with_lines(lines), format: FileFormat::default(), revision: 0 }
     }
 
     /// Потоковая загрузка UTF-8 из файла: байты читаются в rope
@@ -69,7 +73,7 @@ impl Document {
     pub fn load_file_detected(path: impl AsRef<Path>) -> io::Result<Self> {
         let (rope, format) = crate::encoding::load_path(path.as_ref())?;
         let lines = rope.len_lines();
-        Ok(Document { rope, meta: LineMeta::with_lines(lines), format })
+        Ok(Document { rope, meta: LineMeta::with_lines(lines), format, revision: 0 })
     }
 
     /// Потоковое сохранение: обратная конвертация переводов строк
@@ -150,7 +154,14 @@ impl Document {
     /// до-транзакционному состоянию.
     pub fn apply(&mut self, tx: &Transaction) -> Transaction {
         self.meta.apply_transaction(tx, &self.rope);
+        self.revision = self.revision.wrapping_add(1);
         tx.apply(&mut self.rope)
+    }
+
+    /// Ревизия содержимого (markdown-preview D4): растёт на каждую
+    /// транзакцию; чтения и обращения не меняют.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 }
 
@@ -209,6 +220,22 @@ mod tests {
         assert_eq!(doc.text(), "ello beautiful world");
         doc.apply(&inverse);
         assert_eq!(doc.text(), original);
+    }
+
+    /// Markdown-preview D4 (задача 2.1): ревизия растёт на мутации
+    /// (вставка/удаление/undo-обратная), не меняется на чтение.
+    #[test]
+    fn revision_bumps_on_mutations_only() {
+        let mut doc = Document::from_text("hello");
+        let r0 = doc.revision();
+        assert_eq!(doc.text(), "hello"); // чтение не меняет
+        assert_eq!(doc.revision(), r0);
+        doc.apply(&Transaction::from_edits(vec![Edit::insert(5, "!")]));
+        assert_eq!(doc.revision(), r0 + 1);
+        doc.apply(&Transaction::from_edits(vec![Edit::delete(5, 6)]));
+        assert_eq!(doc.revision(), r0 + 2);
+        doc.line_content(0); // чтение снова не меняет
+        assert_eq!(doc.revision(), r0 + 2);
     }
 
     #[test]

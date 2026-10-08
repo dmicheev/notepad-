@@ -287,11 +287,11 @@ impl Workspace {
     /// панели прокручивает остальные по первой видимой строке.
     pub(crate) fn toggle_sync_scroll(&mut self, cx: &mut Context<Self>) {
         self.sync_scroll = !self.sync_scroll;
-        self.status_message = Some(if self.sync_scroll {
+        self.set_status_message(if self.sync_scroll {
             crate::i18n::t(cx, "status.sync_scroll_on")
         } else {
             crate::i18n::t(cx, "status.sync_scroll_off")
-        });
+        }, cx);
         cx.notify();
     }
 

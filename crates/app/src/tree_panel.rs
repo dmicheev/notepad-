@@ -106,6 +106,9 @@ impl Workspace {
         match FsTree::open(root) {
             Ok(tree) => {
                 self.tree = Some(tree);
+                // Настройки воркспейса (.settings): загрузка под НОВЫЙ
+                // корень; гидратация меток вкладок — на следующем кадре.
+                self.load_workspace_settings(root);
                 self.context_menu = None;
                 self.tree_dialog = None;
                 self.drop_target = None;
@@ -117,21 +120,21 @@ impl Workspace {
                     }
                     Err(e) => {
                         self.fs_watch = None;
-                        self.status_message = Some(crate::i18n::tf(
+                        self.set_status_message(crate::i18n::tf(
                             cx,
                             "status.watch_unavailable",
                             &[("err", &e.to_string())],
-                        ));
+                        ), cx);
                     }
                 }
                 cx.notify();
             }
             Err(e) => {
-                self.status_message = Some(crate::i18n::tf(
+                self.set_status_message(crate::i18n::tf(
                     cx,
                     "status.workspace_open_failed",
                     &[("path", &root.display().to_string()), ("err", &e.to_string())],
-                ));
+                ), cx);
                 cx.notify();
             }
         }
@@ -193,7 +196,7 @@ impl Workspace {
     /// Уведомление, когда воркспейс не открыт (действия дерева).
     fn require_tree(&mut self, cx: &mut Context<Self>) -> bool {
         if self.tree.is_none() {
-            self.status_message = Some(crate::i18n::t(cx, "status.no_workspace"));
+            self.set_status_message(crate::i18n::t(cx, "status.no_workspace"), cx);
             cx.notify();
             false
         } else {
@@ -239,12 +242,12 @@ impl Workspace {
             return;
         };
         let Some(node) = tree.selected().map(|p| p.to_path_buf()) else {
-            self.status_message = Some(crate::i18n::t(cx, "status.select_to_rename"));
+            self.set_status_message(crate::i18n::t(cx, "status.select_to_rename"), cx);
             cx.notify();
             return;
         };
         if node == tree.root() {
-            self.status_message = Some(crate::i18n::t(cx, "status.cannot_rename_root"));
+            self.set_status_message(crate::i18n::t(cx, "status.cannot_rename_root"), cx);
             cx.notify();
             return;
         }
@@ -268,12 +271,12 @@ impl Workspace {
             return;
         };
         let Some(node) = tree.selected().map(|p| p.to_path_buf()) else {
-            self.status_message = Some(crate::i18n::t(cx, "status.select_to_delete"));
+            self.set_status_message(crate::i18n::t(cx, "status.select_to_delete"), cx);
             cx.notify();
             return;
         };
         if node == tree.root() {
-            self.status_message = Some(crate::i18n::t(cx, "status.cannot_delete_root"));
+            self.set_status_message(crate::i18n::t(cx, "status.cannot_delete_root"), cx);
             cx.notify();
             return;
         }
@@ -311,18 +314,18 @@ impl Workspace {
                     if let Some(tree) = &mut ws.tree {
                         match tree.delete(&node) {
                             Ok(()) => {
-                                ws.status_message = Some(crate::i18n::tf(
+                                ws.set_status_message(crate::i18n::tf(
                                     cx,
                                     "status.deleted",
                                     &[("name", &name)],
-                                ));
+                                ), cx);
                             }
                             Err(e) => {
-                                ws.status_message = Some(crate::i18n::tf(
+                                ws.set_status_message(crate::i18n::tf(
                                     cx,
                                     "status.delete_failed",
                                     &[("err", &e.to_string())],
-                                ));
+                                ), cx);
                             }
                         }
                     }
@@ -399,14 +402,14 @@ impl Workspace {
                 if let TreeDialogKind::Rename { old_path, .. } = &dialog.kind {
                     self.retag_path_all(old_path, &path);
                 }
-                self.status_message = Some(verb);
+                self.set_status_message(verb, cx);
                 // Созданное/переименованное — выделено в дереве.
                 if let Some(tree) = &mut self.tree {
                     tree.select(Some(&path));
                 }
             }
             Err(e) => {
-                self.status_message = Some(e.to_string());
+                self.set_status_message(e.to_string(), cx);
             }
         }
         cx.notify();
@@ -453,11 +456,11 @@ impl Workspace {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| to_dir.display().to_string());
-                self.status_message = Some(crate::i18n::tf(
+                self.set_status_message(crate::i18n::tf(
                     cx,
                     "status.moved",
                     &[("name", &name), ("dir", &dir_name)],
-                ));
+                ), cx);
             }
             Err(e) => {
                 self.status_message =

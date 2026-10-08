@@ -65,8 +65,13 @@ pub(crate) struct Theme {
     pub search_match: u32,
     pub search_current: u32,
     pub search_error: u32,
-    /// Ховер кликабельных зон (язык в статус-баре, чипы поиска).
+    /// Ховер кликабельных зон (язык в статус-бара, чипы поиска).
     pub status_lang_hover: u32,
+    // Предпросмотр Markdown (markdown-preview D5): ссылка, фон
+    // код-чипа/блока, полоса цитаты.
+    pub preview_link: u32,
+    pub preview_code_bg: u32,
+    pub preview_quote_bar: u32,
     // Полосы прокрутки: ползунок (ховер — светлее/темнее), дорожки
     // редактора — своя зона у текста.
     pub scrollbar_thumb: u32,
@@ -112,6 +117,9 @@ pub(crate) static DARK: Theme = Theme {
     search_current: 0xd78a12,
     search_error: 0xf14c4c,
     status_lang_hover: 0x3d9be8,
+    preview_link: 0x4db2ff,
+    preview_code_bg: 0x2a2d2e,
+    preview_quote_bar: 0x6a737d,
     scrollbar_thumb: 0x4a4a4c,
     scrollbar_thumb_hover: 0x636366,
     scrollbar_track: 0x1a1a1b,
@@ -154,6 +162,9 @@ pub(crate) static LIGHT: Theme = Theme {
     search_current: 0xffd24a,
     search_error: 0xcd3131,
     status_lang_hover: 0x1f7fd6,
+    preview_link: 0x0563c1,
+    preview_code_bg: 0xf0f0f0,
+    preview_quote_bar: 0x9aa0a6,
     scrollbar_thumb: 0xc1c1c1,
     scrollbar_thumb_hover: 0xa8a8a8,
     scrollbar_track: 0xf5f5f5,

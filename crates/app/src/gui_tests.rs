@@ -543,6 +543,57 @@ fn bookmark_actions_navigate(cx: &mut TestAppContext) {
     assert_eq!(bms, vec![3]);
 }
 
+/// Воркспейс-настройки (.settings/workspace.toml): закладка пишется
+/// на toggle, переживает закрытие вкладки и восстанавливается при
+/// повторном открытии файла; снятие последней закладки убирает запись.
+#[gpui::test]
+fn workspace_settings_bookmarks_roundtrip(cx: &mut TestAppContext) {
+    let (view, cx, root) = workspace_window(cx, "ws-settings");
+    let todo = root.join("todo.txt");
+    let settings = root.join(".settings").join("workspace.toml");
+
+    // Открыть файл и поставить закладку на строке 1 — запись сразу.
+    cx.update_window_entity(&view, |ws, _w, _cx| {
+        ws.model_mut().open_path(&todo).unwrap();
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.toggle_bookmark_at(1, cx);
+    });
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(&settings).expect("файл настроек создан");
+    assert!(text.contains("[files.\"todo.txt\"]"), "секция файла: {text}");
+    assert!(text.contains("bookmarks = [1]"), "строка закладки: {text}");
+
+    // Закрыть вкладку — запись merge сохранена (закладки переживают
+    // закрытие файла).
+    cx.update_window_entity(&view, |ws, _w, _cx| {
+        let ix = ws.model().active_index().unwrap();
+        ws.model_mut().close(ix);
+    });
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(&settings).unwrap();
+    assert!(text.contains("[files.\"todo.txt\"]"), "запись пережила закрытие: {text}");
+
+    // Повторное открытие — гидратация в render восстанавливает закладку
+    // (notify: без кадра render-гидратация не выполняется).
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.model_mut().open_path(&todo).unwrap();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let bm = cx.cx.update(|app| view.read(app).model().active().unwrap().bookmarked_lines());
+    assert_eq!(bm, vec![1], "закладка восстановлена из .settings");
+
+    // Снятие последней закладки — запись удалена (файл без мусора).
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        ws.toggle_bookmark_at(1, cx);
+    });
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(&settings).unwrap();
+    assert!(!text.contains("todo.txt"), "пустое состояние убирает запись: {text}");
+}
+
 /// 4.4: закладки переживают undo/redo (GUI-путь: ввод через
 /// keystrokes, undo действием).
 #[gpui::test]
@@ -2692,4 +2743,424 @@ fn hotkeys_tab_cycle_and_shortcuts_reference(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(cx.debug_bounds("shortcuts-overlay").is_none(), "справочник закрыт");
+}
+
+// ---- Предпросмотр Markdown (change markdown-preview) ----
+
+/// Окно с открытыми файлами-вкладками (первый — активный).
+fn markdown_window<'a>(
+    cx: &'a mut TestAppContext,
+    tag: &str,
+    files: &[(&str, &str)],
+) -> (gpui::Entity<Workspace>, &'a mut gpui::VisualTestContext) {
+    let dir = TempDir::new(tag);
+    let paths: Vec<std::path::PathBuf> = files
+        .iter()
+        .map(|(name, content)| dir.write(name, content))
+        .collect();
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        let mut ws = Workspace::new(cx);
+        for path in &paths {
+            ws.model_mut().open_path(path).unwrap();
+        }
+        ws.model_mut().activate(0); // активна первая (a.md)
+        ws
+    });
+    focus_editor(&view, cx);
+    (view, cx)
+}
+
+/// 3.1: Cmd+Shift+V — тумблер панели (открыть/закрыть).
+#[gpui::test]
+fn markdown_preview_toggle_and_binding(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "md-toggle", &[("notes.md", "# Заголовок\n\nАбзац\n")]);
+    cx.cx.update(bind_app_keys);
+    cx.simulate_keystrokes("cmd-shift-v");
+    cx.run_until_parked();
+    assert!(cx.cx.update(|app| view.read(app).markdown_preview.open), "панель открыта");
+    cx.simulate_keystrokes("cmd-shift-v");
+    cx.run_until_parked();
+    assert!(!cx.cx.update(|app| view.read(app).markdown_preview.open), "панель закрыта");
+}
+
+/// Драг разделителя [редактор | предпросмотр] меняет ширину панели;
+/// клампы держат минимумы редактора/панели; двойной клик — сброс к
+/// пропорции 40%.
+#[gpui::test]
+fn markdown_preview_divider_drag(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "md-divider", &[("notes.md", "# Заголовок\n\nАбзац\n")]);
+    cx.cx.update(bind_app_keys);
+    cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
+    cx.run_until_parked();
+
+    // Стартовая геометрия: панель по умолчанию (flex_basis 40%),
+    // разделитель — её левый сосед.
+    let before = cx.debug_bounds("preview-panel").expect("панель отрисована");
+    let div = cx.debug_bounds("preview-divider").expect("разделитель отрисован");
+    let vw = f32::from(before.right()); // панель упирается в правый край окна
+    assert_eq!(
+        cx.cx.update(|app| view.read(app).markdown_preview_width_for_test()),
+        None,
+        "до драга — пропорция по умолчанию"
+    );
+
+    // Драг на 100px влево — панель на ~100px шире.
+    let start = div.center();
+    let target = point(px(f32::from(start.x) - 100.0), px(f32::from(start.y)));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(target, Some(MouseButton::Left), Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    let after = cx.debug_bounds("preview-panel").expect("панель после драга");
+    // Ожидание — ровно формула драга: vw − x мыши (центр 5px хит-зоны
+    // на 2.5px левее края панели — сдвиг учтён формулой).
+    let expected = crate::geometry::preview_width_at(f32::from(target.x), vw);
+    assert!(
+        (f32::from(after.size.width) - expected).abs() < 1.5,
+        "ширина {}, ждали {expected}",
+        f32::from(after.size.width)
+    );
+    assert!(
+        f32::from(after.size.width) > f32::from(before.size.width),
+        "панель стала шире"
+    );
+    assert_eq!(
+        cx.cx.update(|app| view.read(app).markdown_preview_width_for_test()),
+        Some(f32::from(after.size.width)),
+        "явная ширина зафиксирована"
+    );
+
+    // Кламп: драг далеко влево — ширина по preview_width_at (редактору
+    // остаётся EDITOR_MIN_W, панель не уже PREVIEW_MIN_W).
+    let div = cx.debug_bounds("preview-divider").expect("разделитель после драга");
+    let start = div.center();
+    let far = point(px(10.0), px(f32::from(start.y)));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(far, Some(MouseButton::Left), Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    let clamped = cx.debug_bounds("preview-panel").expect("панель после клампа");
+    let expected = crate::geometry::preview_width_at(10.0, vw);
+    assert!(
+        (f32::from(clamped.size.width) - expected).abs() < 1.5,
+        "кламп: ширина {}, ждали {expected}",
+        f32::from(clamped.size.width)
+    );
+
+    // Двойной клик по разделителю — сброс к пропорции 40%. Клики
+    // helpers всегда click_count:1 — шлём down с click_count:2
+    // напрямую (реальный double-click; up не нужен — сброс на down).
+    let div = cx.debug_bounds("preview-divider").expect("разделитель после клампа");
+    let at = div.center();
+    cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.cx.update(|app| view.read(app).markdown_preview_width_for_test()),
+        None,
+        "двойной клик — сброс к пропорции"
+    );
+}
+
+/// 3.3: предпросмотр следует за активной вкладкой; не-Markdown — без
+/// модели (placeholder), возврат к Markdown — модель строится.
+#[gpui::test]
+fn markdown_preview_follows_active_tab(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(
+        cx,
+        "md-follow",
+        &[("a.md", "# Один\n\n- x\n"), ("b.md", "## Два\n\nтекст\n"), ("main.rs", "fn main() {}\n")],
+    );
+    cx.cx.update(bind_app_keys); // keystrokes переключения вкладок
+    cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
+    cx.run_until_parked();
+    // Активна a.md — модель синхронно построена (≤ 2 МБ, D4).
+    assert_eq!(
+        cx.cx.update(|app| view.read(app).preview_item_count()),
+        Some(2),
+        "a.md: заголовок + пункт списка"
+    );
+    // b.md — своя модель.
+    cx.simulate_keystrokes("cmd-shift-]");
+    cx.run_until_parked();
+    assert_eq!(cx.cx.update(|app| view.read(app).preview_item_count()), Some(2), "b.md");
+    // main.rs — источник пропал (placeholder-ветка панели).
+    cx.simulate_keystrokes("cmd-shift-]");
+    cx.run_until_parked();
+    let md_active = cx.cx.update(|app| {
+        view.read(app)
+            .model()
+            .active()
+            .is_some_and(crate::markdown_preview::is_markdown_tab_for_test)
+    });
+    assert!(!md_active, "не-Markdown вкладка — источника нет");
+    // Возврат к a.md — модель перестроена под неё.
+    cx.simulate_keystrokes("cmd-shift-[");
+    cx.run_until_parked();
+    assert_eq!(cx.cx.update(|app| view.read(app).preview_item_count()), Some(2), "возврат к a.md");
+}
+
+/// 3.4: правка `##` → `#` отражается в модели без сохранения (debounce
+/// 200 мс + фон; advance_clock будит таймер).
+#[gpui::test]
+fn markdown_preview_live_update(cx: &mut TestAppContext) {
+    let (view, cx) =
+        markdown_window(cx, "md-live", &[("doc.md", "## Заголовок\n\nАбзац\n")]);
+    cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
+    cx.run_until_parked();
+    assert_eq!(cx.cx.update(|app| view.read(app).preview_item_count()), Some(2));
+
+    // Правка в редакторе: `## ` → `# ` (первые 3 char: '#','#',' ').
+    cx.cx.update(|app| {
+        view.update(app, |ws, cx| {
+            let tab = ws.model_mut().active_mut().unwrap();
+            let tx = editor_core::Transaction::from_edits(vec![
+                editor_core::transaction::Edit::delete(0, 1),
+            ]);
+            tab.apply_tx(tx);
+            cx.notify();
+        })
+    });
+    // Debounce: до тишины 200 мс модель НЕ пересобрана под новую
+    // ревизию; после — пересобрана (заголовок стал h1, рядов столько же).
+    cx.cx.executor().advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+    let before = cx.cx.update(|app| view.read(app).markdown_preview_revision());
+    cx.cx.executor().advance_clock(std::time::Duration::from_millis(250));
+    cx.run_until_parked();
+    let after = cx.cx.update(|app| view.read(app).markdown_preview_revision());
+    assert!(after >= before, "модель обновилась после debounce");
+    assert_eq!(cx.cx.update(|app| view.read(app).preview_item_count()), Some(2), "ряды на месте");
+}
+
+/// 4.5: клик по http(s)-ссылке в предпросмотре открывает браузер ОС
+/// (TestAppContext перехватывает open_url).
+#[gpui::test]
+fn markdown_preview_link_click_opens_url(cx: &mut TestAppContext) {
+    let (view, cx) =
+        markdown_window(cx, "md-link", &[("l.md", "[сайт](https://example.com)\n")]);
+    cx.cx.update(bind_app_keys);
+    cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("md-row-0").expect("абзац со ссылкой отрисован");
+    let center = bounds.center();
+    cx.simulate_click(center, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(cx.cx.opened_url(), Some("https://example.com".to_string()));
+    assert!(cx.cx.update(|app| view.read(app).markdown_preview.open), "панель не закрылась");
+}
+
+// ---- Тулбар и окно подсказок (change toolbar-and-shortcuts) ----
+
+/// 1.1: View → Toolbar скрывает/показывает полосу. Невидимость
+/// проверяется ПОВЕДЕНИЕМ (клик в бывшую позицию кнопки мёртв):
+/// debug_bounds в test-support не чистит исчезнувшие элементы
+/// 1.1: View → Toolbar скрывает/показывает полосу. Невидимость
+/// проверяется ПОВЕДЕНИЕМ (клик в бывшую позицию кнопки мёртв):
+/// debug_bounds в test-support не чистит исчезнувшие элементы
+/// (`Frame::clear` не трогает `debug_bounds`) — «is_none» ненадёжен.
+#[gpui::test]
+fn toolbar_toggle_hides_and_shows(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "tb-toggle", &[("a.txt", "x\n")]);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("toolbar").is_some(), "тулбар виден по умолчанию");
+    let save_pos = cx.debug_bounds("tool-save").unwrap().center();
+    // Скрыть: состояние + мёртвая кнопка (правка не сохраняется).
+    cx.dispatch_action(ToggleToolbar);
+    cx.run_until_parked();
+    assert!(!cx.cx.update(|app| view.read(app).toolbar_visible), "скрыт");
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        let tab = ws.model_mut().active_mut().unwrap();
+        tab.apply_tx(editor_core::Transaction::from_edits(vec![
+            editor_core::transaction::Edit::insert(0, "!"),
+        ]));
+        cx.notify();
+    });
+    cx.simulate_click(save_pos, Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.cx.update(|app| view.read(app).model().active().unwrap().dirty),
+        "кнопка скрытой полосы не срабатывает"
+    );
+    // Вернуть: кнопка снова работает (клик сохраняет).
+    cx.dispatch_action(ToggleToolbar);
+    cx.run_until_parked();
+    assert!(cx.cx.update(|app| view.read(app).toolbar_visible), "возвращён");
+    cx.simulate_click(save_pos, Modifiers::default());
+    cx.run_until_parked();
+    let (dirty, disk) = cx.cx.update(|app| {
+        let ws = view.read(app);
+        let tab = ws.model().active().unwrap();
+        (tab.dirty, std::fs::read_to_string(tab.path.as_ref().unwrap()).unwrap())
+    });
+    assert!(!dirty, "возвращённая кнопка сохранила");
+    assert_eq!(disk, "!x\n");
+}
+
+/// 3.1: кнопка Save делает то же, что Cmd+S (dispatch того же action).
+#[gpui::test]
+fn toolbar_save_button_dispatches_save(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "tb-save", &[("a.txt", "изначально\n")]);
+    cx.run_until_parked();
+    // Правка → dirty → клик по кнопке Save → чисто (файл на диске
+    // перезаписан). Путь кнопки = путь действия.
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        let tab = ws.model_mut().active_mut().unwrap();
+        tab.apply_tx(editor_core::Transaction::from_edits(vec![
+            editor_core::transaction::Edit::insert(0, "!"),
+        ]));
+        assert!(tab.dirty);
+        cx.notify();
+    });
+    let save = cx.debug_bounds("tool-save").expect("кнопка Save отрисована");
+    cx.simulate_click(save.center(), Modifiers::default());
+    cx.run_until_parked();
+    let (dirty, disk) = cx.cx.update(|app| {
+        let ws = view.read(app);
+        let tab = ws.model().active().unwrap();
+        (tab.dirty, std::fs::read_to_string(tab.path.as_ref().unwrap()).unwrap())
+    });
+    assert!(!dirty, "кнопка сохранила");
+    assert_eq!(disk, "!изначально\n");
+}
+
+/// 3.3: дропдаун «Текст» — Sort Ascending сортирует строки файла;
+/// Esc закрывает список без действия (сценарии спеки).
+#[gpui::test]
+fn toolbar_text_dropdown_sorts_and_esc_closes(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "tb-text", &[("a.txt", "b\na\nc\n")]);
+    cx.run_until_parked();
+    // Открыть дропдаун кликом по кнопке «Текст».
+    let btn = cx.debug_bounds("tool-text-ops").expect("кнопка Текст");
+    cx.simulate_click(btn.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("toolbar-dropdown").is_some(), "дропдаун открыт");
+    // Esc — закрыть без действия (состояние; debug_bounds не чистит
+    // исчезнувшие элементы — см. toolbar_toggle_hides_and_shows).
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !cx.cx.update(|app| view.read(app).toolbar_dropdown.is_some()),
+        "Esc закрыл дропдаун"
+    );
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
+    assert_eq!(text, "b\na\nc\n", "действия не было");
+    // Открыть снова и выбрать Sort Ascending — строки сортированы.
+    cx.simulate_click(btn.center(), Modifiers::default());
+    cx.run_until_parked();
+    let item = cx.debug_bounds("dd-item-menu.text.sort_asc").expect("пункт Sort Asc");
+    cx.simulate_click(item.center(), Modifiers::default());
+    cx.run_until_parked();
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
+    assert_eq!(text, "a\nb\nc\n", "сортировка из дропдауна");
+    assert!(
+        !cx.cx.update(|app| view.read(app).toolbar_dropdown.is_some()),
+        "меню закрылось выбором"
+    );
+}
+
+/// 3.4 + 5.1: кнопка предпросмотра — toggle-состояние и действие
+/// (синхронизация: панель открыта кнопкой = открыта тумблером).
+#[gpui::test]
+fn toolbar_preview_button_toggles_preview(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "tb-preview", &[("a.md", "# Заг\n")]);
+    cx.run_until_parked();
+    let btn = cx.debug_bounds("tool-preview").expect("кнопка превью");
+    cx.simulate_click(btn.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.cx.update(|app| view.read(app).markdown_preview.open), "клик открыл превью");
+    cx.simulate_click(btn.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(!cx.cx.update(|app| view.read(app).markdown_preview.open), "повторный клик закрыл");
+}
+
+/// 4.3: кнопка «?» открывает окно; 4.2: поиск фильтрует по названию
+/// и клавише, пустой результат — сообщение.
+#[gpui::test]
+fn shortcuts_window_button_and_search(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "tb-help", &[("a.txt", "x\n")]);
+    cx.cx.update(bind_app_keys);
+    cx.run_until_parked();
+    // Кнопка «?» открывает центрированное окно.
+    let btn = cx.debug_bounds("tool-help").expect("кнопка «?»");
+    cx.simulate_click(btn.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-overlay").is_some(), "окно открыто кнопкой");
+    // Поиск по клавише: «save» → есть записи (Save ⌘S), нет «нет
+    // совпадений».
+    cx.simulate_keystrokes("s a v e");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-no-matches").is_none(), "save находится");
+    // Мусорный запрос — сообщение об отсутствии.
+    cx.simulate_keystrokes("z z z q");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("shortcuts-no-matches").is_some(), "пустой результат виден");
+    // Esc закрывает, фокус возвращается редактору (состояние:
+    // debug_bounds не чистит исчезнувшие элементы — см. toggle-тест).
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !cx.cx.update(|app| view.read(app).shortcuts_open),
+        "окно закрыто (Esc)"
+    );
+}
+
+// ---- Транзиентные сообщения статус-бара (починка: позиция/кодировка
+// пропадали навсегда после тумблеров) ----
+
+/// Сообщение подменяет левый блок на TTL секунд, затем позиция/
+/// кодировка/язык возвращаются; новое сообщение перезапускает таймер.
+#[gpui::test]
+fn status_message_auto_expires(cx: &mut TestAppContext) {
+    let (view, cx) = markdown_window(cx, "status-ttl", &[("a.txt", "x\n")]);
+    cx.run_until_parked();
+    // Базовый текст: кодировка | переводы | позиция | язык.
+    let base = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    assert!(base.starts_with("UTF-8"), "база: {base}");
+    assert!(base.contains("Ln 1, Col 1"), "база: {base}");
+
+    // Тумблер превью → сообщение; TTL не прошло — держится.
+    cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
+    cx.run_until_parked();
+    let shown = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    assert!(!shown.contains("Ln 1"), "сообщение подменило блок: {shown}");
+
+    // Новое сообщение за секунду до истечения перезапускает таймер
+    // (поколение): sync-scroll через 3 с после превью.
+    cx.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(3));
+    cx.dispatch_action(crate::actions::ToggleSyncScroll);
+    cx.run_until_parked();
+    // +3 с (итого 6 с от превью, 3 с от sync) — превью-таймер сработал,
+    // но поколение новее: сообщение sync ещё живо.
+    cx.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(3));
+    cx.run_until_parked();
+    let held = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    assert!(held.contains("scrolling"), "новое сообщение живо: {held}");
+
+    // До конца TTL sync-сообщения — блок всё ещё подменён…
+    cx.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    // …и ещё секунда — очистилось, база вернулась.
+    cx.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    let restored = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    assert!(restored.contains("Ln 1, Col 1"), "база вернулась: {restored}");
 }

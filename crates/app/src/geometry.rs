@@ -18,6 +18,14 @@ pub(crate) const GUTTER_W: f32 = 56.0;
 pub(crate) const GUTTER_ZONE_W: f32 = 14.0;
 /// Ширина левой панели «Project» (px).
 pub(crate) const PANEL_W: f32 = 220.0;
+/// Минимальная ширина панели предпросмотра Markdown (px).
+pub(crate) const PREVIEW_MIN_W: f32 = 320.0;
+/// Минимальная ширина области редактора при драге разделителя
+/// предпросмотра (px).
+pub(crate) const EDITOR_MIN_W: f32 = 400.0;
+/// Ширина хит-зоны разделителя предпросмотра (px); визуальная
+/// линия внутри — 1px.
+pub(crate) const PREVIEW_DIVIDER_HIT_W: f32 = 5.0;
 /// Высота таб-бара (px).
 pub(crate) const TABBAR_H: f32 = 32.0;
 /// Высота статус-бара (px).
@@ -52,9 +60,6 @@ impl FontConfig {
 pub(crate) const DEFAULT_FONT: &str = "Menlo";
 /// Размер шрифта по умолчанию (px).
 pub(crate) const DEFAULT_FONT_SIZE: f32 = 13.0;
-/// Заранее измерить не удалось (текстовая система недоступна) —
-/// оценка сверху для клика: ~0.6em у моноширинного Menlo (D9.2).
-pub(crate) const FALLBACK_CHAR_ADVANCE: f32 = DEFAULT_FONT_SIZE * 0.6;
 
 impl Workspace {
     // ---- Шрифт редактора (8.3): семейство/размер/высота строки ----
@@ -154,11 +159,20 @@ impl Workspace {
 /// Видимость липкой шапки CSV (D12.5): строка 0 полностью ушла из
 /// вида — `|offset.y| ≥ LINE_HEIGHT` (offset.y ОТРИЦАТЕЛЕН при
 /// прокрутке вниз — см. `visible_line_at_y`; положительный —
-/// овёрскролл-отскок вверх, строка 0 видна). Частичный показ
+/// овэрскролл-отскок вверх, строка 0 видна). Частичный показ
 /// (0 < |offset| < LINE_HEIGHT) шапку НЕ дублирует — дубль поверх
-/// наполовину видимой строки 0 мерцает.
+/// наполовину видной строки 0 мерцает.
 pub(crate) fn sticky_header_visible(offset_y: f32) -> bool {
     offset_y.abs() >= LINE_HEIGHT
+}
+
+/// Ширина предпросмотра из позиции мыши на разделителе: правый край
+/// окна − x (панель упирается в правый край окна), клампы
+/// [PREVIEW_MIN_W, vw − EDITOR_MIN_W]. Двойной кламп max — окно
+/// уже суммы минимумов: отдаём приоритет предпросмотру (редактор
+/// остаётся с гибким min_w_0 строки).
+pub(crate) fn preview_width_at(mouse_x: f32, viewport_w: f32) -> f32 {
+    (viewport_w - mouse_x).clamp(PREVIEW_MIN_W, (viewport_w - EDITOR_MIN_W).max(PREVIEW_MIN_W))
 }
 
 /// Измерение advance «0» выбранного шрифта; fallback 0.6em, если
@@ -189,7 +203,24 @@ mod tests {
         assert!(sticky_header_visible(-400.0), "глубокая прокрутка — шапка");
         assert!(
             !sticky_header_visible(12.0),
-            "овёрскролл-отскок вверх — строка 0 видна, шапки нет"
+            "овэрскролл-отскок вверх — строка 0 видна, шапки нет"
         );
+    }
+
+    /// Клампы ширины предпросмотра при драге разделителя: мышь →
+    /// ширина (правый край − x), минимумы панели/редактора, узкое
+    /// окно — приоритет минимуму предпросмотра.
+    #[test]
+    fn preview_width_clamps() {
+        // Свободная зона: ширина = vw − x.
+        assert_eq!(preview_width_at(600.0, 1200.0), 600.0);
+        // Мышь у правого края — минимум панели.
+        assert_eq!(preview_width_at(1100.0, 1200.0), PREVIEW_MIN_W);
+        // Мышь далеко влево — редактору остаётся EDITOR_MIN_W.
+        assert_eq!(preview_width_at(100.0, 1200.0), 1200.0 - EDITOR_MIN_W);
+        // Окно уже суммы минимумов — клампы не переворачиваются.
+        let w = preview_width_at(0.0, 500.0);
+        assert_eq!(w, PREVIEW_MIN_W);
+        assert!(w <= 500.0);
     }
 }

@@ -23,6 +23,10 @@ actions!(
         // Язык интерфейса (8.4/D15.4).
         OpenUiLanguageDialog,
         // Раскладка 8.5: вкладки + справочник + язык.
-        NewTab, NextTab, PrevTab, ShowShortcuts, CycleLanguage
+        NewTab, NextTab, PrevTab, ShowShortcuts, CycleLanguage,
+        // Предпросмотр Markdown (markdown-preview).
+        ToggleMarkdownPreview,
+        // Тулбар (toolbar-and-shortcuts).
+        ToggleToolbar
     ]
 );

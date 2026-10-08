@@ -41,6 +41,10 @@ pub struct SessionState {
     /// Язык интерфейса (8.4): код файла переводов ("en", "ru", …).
     #[serde(default)]
     pub language: Option<String>,
+    /// Тулбар (toolbar-and-shortcuts): видимость между сессиями;
+    /// None/отсутствие (старые сессии) — виден.
+    #[serde(default)]
+    pub toolbar_visible: Option<bool>,
 }
 
 /// Настройка шрифта редактора (8.3).
@@ -169,6 +173,7 @@ mod tests {
             active_tab: Some(1),
             window: Some(WindowGeometry { x: 10.5, y: 20.0, width: 1024.0, height: 768.0 }),
             theme: Some("dark".to_string()),
+            toolbar_visible: Some(false),
             font: Some(FontSettings {
                 family: "Menlo".to_string(),
                 size: 14.0,
@@ -205,6 +210,7 @@ mod tests {
             active_tab: Some(0),
             window: Some(WindowGeometry { x: 0.0, y: 0.0, width: 800.0, height: 600.0 }),
             theme: None,
+            toolbar_visible: None,
             font: None,
             language: None,
         };

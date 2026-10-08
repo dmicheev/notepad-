@@ -40,7 +40,7 @@ impl Workspace {
             Err(e) => {
                 sp.scanning = false;
                 sp.error = Some(e.clone());
-                self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]));
+                self.set_status_message(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]), cx);
                 cx.notify();
                 return;
             }
@@ -158,7 +158,7 @@ impl Workspace {
             Some(Ok(m)) => m,
             Some(Err(e)) => {
                 sp.error = Some(e.clone());
-                self.status_message = Some(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]));
+                self.set_status_message(crate::i18n::tf(cx, "search.pattern_invalid_status", &[("err", &e.to_string())]), cx);
                 cx.notify();
                 return;
             }
@@ -304,21 +304,22 @@ impl Workspace {
     }
 
     /// Завершение скана: итог + сообщение статус-бара.
-    pub(crate) fn finish_folder_scan(&mut self, summary: ScanSummary, cx: &gpui::App) {
+    pub(crate) fn finish_folder_scan(&mut self, summary: ScanSummary, cx: &gpui::Context<Self>) {
         let Some(sp) = self.search.as_mut() else { return };
         sp.scanning = false;
         sp.summary = Some(summary);
         // Открытые вкладки могли дать совпадения вне summary —
         // берём фактическое число результатов.
         let hits = sp.results.len();
-        self.status_message = Some(crate::i18n::tf(
+        let msg = crate::i18n::tf(
             cx,
             "search.status_summary",
             &[
                 ("hits", &hits.to_string()),
                 ("files", &summary.files_with_hits.to_string()),
             ],
-        ));
+        );
+        self.set_status_message(msg, cx);
     }
 
     /// Замена по файлам (6.5): подтверждение `Window::prompt`, затем
@@ -423,7 +424,7 @@ impl Workspace {
                 }
             }
         }
-        self.status_message = Some(if total == 0 {
+        self.set_status_message(if total == 0 {
             crate::i18n::t(cx, "search.no_matches_to_replace")
         } else {
             crate::i18n::tf(
@@ -431,9 +432,9 @@ impl Workspace {
                 "search.replaced_files",
                 &[("n", &total.to_string()), ("m", &files_changed.to_string())],
             )
-        });
+        }, cx);
         if let Some(e) = first_error {
-            self.status_message = Some(e);
+            self.set_status_message(e, cx);
         }
         // Совпадения панели устарели — убрать (повторный поиск покажет
         // актуальное состояние вкладок).

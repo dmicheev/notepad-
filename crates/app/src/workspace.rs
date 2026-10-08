@@ -64,8 +64,12 @@ pub struct Workspace {
     pub(crate) shortcuts_focus: gpui::FocusHandle,
     pub focus: FocusHandle,
     /// Транзиентное сообщение статус-бара (ошибки открытия/сохранения,
-    /// пропущенные при рестарте вкладки); живёт до следующего сообщения.
+    /// уведомления тумблеров): подменяет левый блок на STATUS_TTL,
+    /// затем самоочищается (таймер; поколение защищает новое сообщение
+    /// от очистки старым таймером).
     pub status_message: Option<String>,
+    /// Поколение сообщения (каждый set инкрементирует).
+    pub(crate) status_generation: u64,
     /// Кэш заголовка окна (обновляем в render при изменении).
     pub(crate) rendered_title: Option<String>,
     /// Ширина char в px моноширинного шрифта, измеряется один раз через
@@ -112,11 +116,35 @@ pub struct Workspace {
     pub(crate) panel_scroll: gpui::ScrollHandle,
     pub(crate) language_scroll: gpui::ScrollHandle,
     pub(crate) thumb_drag: Option<crate::scrollbar::ThumbDrag>,
+    /// Предпросмотр Markdown (markdown-preview): тумблер + скролл +
+    /// кэш модели; None-семантики нет — панель живёт, пока включена.
+    pub(crate) markdown_preview: crate::markdown_preview::MarkdownPreview,
+    /// Тулбар (toolbar-and-shortcuts): виден по умолчанию, тумблер
+    /// View → Toolbar, состояние — в сессии.
+    pub toolbar_visible: bool,
+    /// Открытый дропдаун тулбара (одновременно не больше одного).
+    pub(crate) toolbar_dropdown: Option<crate::toolbar::DropdownKind>,
+    /// Позиция открытия дропдауна (точка клика, anchored).
+    pub(crate) toolbar_dropdown_pos: Option<gpui::Point<gpui::Pixels>>,
+    /// Наведённая кнопка тулбара (id + позиция для тултипа).
+    pub(crate) toolbar_hover: Option<(&'static str, gpui::Point<gpui::Pixels>)>,
+    /// Фокус открытого дропдауна (Esc закрывает, спека «Выпадающие
+    /// группы»; клавиши не идут в редактор).
+    pub(crate) toolbar_dd_focus: gpui::FocusHandle,
+    /// Строка поиска окна подсказок (пустая — показать всё).
+    pub(crate) shortcuts_query: String,
+    /// Настройки воркспейса (.settings/workspace.toml): метки строк
+    /// (закладки/фолды) по файлам; пустые — воркспейса нет/файла нет.
+    pub(crate) workspace_settings: crate::workspace_settings::WorkspaceSettings,
 }
 
 impl Workspace {
     /// Максимум панелей split view (спека 8.1: «2 (и до 4)»).
     pub const MAX_PANES: usize = 4;
+
+    /// Сколько секунд транзиентное сообщение держится в статус-баре,
+    /// прежде чем вернуть кодировку/переводы/позицию/язык.
+    pub const STATUS_MESSAGE_TTL: u64 = 4;
 
     pub fn new(cx: &mut Context<Self>) -> Self {
         Workspace {
@@ -135,6 +163,7 @@ impl Workspace {
             shortcuts_focus: cx.focus_handle(),
             focus: cx.focus_handle(),
             status_message: None,
+            status_generation: 0,
             rendered_title: None,
             char_advance: None,
             goto_input: None,
@@ -155,6 +184,14 @@ impl Workspace {
             panel_scroll: gpui::ScrollHandle::new(),
             language_scroll: gpui::ScrollHandle::new(),
             thumb_drag: None,
+            markdown_preview: crate::markdown_preview::MarkdownPreview::new(),
+            toolbar_visible: true,
+            toolbar_dropdown: None,
+            toolbar_dropdown_pos: None,
+            toolbar_hover: None,
+            toolbar_dd_focus: cx.focus_handle(),
+            shortcuts_query: String::new(),
+            workspace_settings: crate::workspace_settings::WorkspaceSettings::default(),
         }
     }
 
@@ -285,6 +322,29 @@ impl Workspace {
                 let _ = RESTART_PAUSE; // рестарт ленивый: walk=None
                                        // пересоздаётся следующим тиком.
             }
+        })
+        .detach();
+    }
+
+    /// Показать транзиентное сообщение статус-бара: живёт
+    /// [`STATUS_MESSAGE_TTL`], затем левый блок (кодировка/переводы/
+    /// позиция/язык) возвращается. Повторный вызов перезапускает
+    /// таймер (старый тик молча отбрасывается по поколению).
+    pub(crate) fn set_status_message(&mut self, msg: String, cx: &Context<Self>) {
+        self.status_message = Some(msg);
+        self.status_generation += 1;
+        let generation = self.status_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(Self::STATUS_MESSAGE_TTL))
+                .await;
+            this.update(cx, |ws, cx| {
+                if ws.status_generation == generation && ws.status_message.is_some() {
+                    ws.status_message = None;
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -627,13 +687,17 @@ impl Workspace {
             }),
             // Язык интерфейса (8.4).
             language: Some(self.ui_language.clone()),
+            // Тулбар (toolbar-and-shortcuts): видимость.
+            toolbar_visible: Some(self.toolbar_visible),
             window: geometry,
         }
     }
 
     /// Сохранить сессию (синхронно; файл маленький) с текущей геометрией
-    /// окна. Вызывается из on_window_should_close и on_app_quit.
-    pub fn persist(&self, window: &Window) {
+    /// окна. Вызывается из on_window_should_close и on_app_quit; перед
+    /// сессией — метки строк воркспейса (.settings).
+    pub fn persist(&mut self, window: &Window) {
+        self.persist_workspace_marks();
         let bounds = match window.window_bounds() {
             gpui::WindowBounds::Windowed(b)
             | gpui::WindowBounds::Maximized(b)
@@ -785,7 +849,10 @@ impl Render for Workspace {
         }
 
         // Мапы видимых строк (folding, D9.5) — пересчёт при устаревании,
-        // для КАЖДОЙ панели.
+        // для КАЖДОЙ панели. До них — гидратация меток из настроек
+        // воркспейса (.settings): закладки/фолды применяются до сборки
+        // фолд-мапы первого кадра.
+        self.hydrate_workspace_marks();
         for pi in 0..self.panes.len() {
             self.ensure_fold_view_of(pi);
         }
@@ -836,13 +903,22 @@ impl Render for Workspace {
         // Левая панель — свой модуль.
         let project_panel = self.render_project_panel(cx);
 
-        // Центральная колонка: область панелей редактора.
-        let center = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .child(self.render_pane_area(window, cx));
+        // Тулбар (toolbar-and-shortcuts): полоса над всем контентом,
+        // включается тумблером View → Toolbar (по умолчанию виден).
+        let toolbar = self
+            .toolbar_visible
+            .then(|| self.render_toolbar(cx));
+
+        // Центральная колонка: [область панелей | разделитель |
+        // предпросмотр Markdown] (markdown-preview: ~40% ширины,
+        // минимум 320 px; разделитель ДРАГАЕТ ширины — двойной клик
+        // сброс; раскладка split-панелей не перестраивается).
+        let mut center = div().flex().flex_1().min_w_0().child(self.render_pane_area(window, cx));
+        if self.markdown_preview.open {
+            center = center
+                .child(self.render_preview_divider(cx))
+                .child(self.render_markdown_preview(cx));
+        }
 
         // Корень: [ панель | центр ] по горизонтали + статус-бар внизу.
         // Действия вешаем на корень (а не на редактор): работают и при
@@ -879,6 +955,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_show_shortcuts))
             .on_action(cx.listener(Self::on_cycle_language))
+            .on_action(cx.listener(Self::on_toggle_markdown_preview))
+            .on_action(cx.listener(Self::on_toggle_toolbar))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_go_to_line))
@@ -911,7 +989,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|_this: &mut Self, _: &Quit, _window, cx| {
                 cx.notify();
                 cx.quit();
-            }))
+            }));
+        // Тулбар — первой полосой корня (над контентом, под оверлеями).
+        if let Some(toolbar) = toolbar {
+            root = root.child(toolbar);
+        }
+        root = root
             .child(
                 div()
                     .flex()
@@ -935,6 +1018,14 @@ impl Render for Workspace {
         }
         if self.shortcuts_open {
             root = root.child(self.render_shortcuts_overlay(cx));
+        }
+        if self.toolbar_dropdown.is_some() {
+            root = root.child(self.render_toolbar_dropdown(cx));
+        }
+        // Захват мыши драгом разделителя предпросмотра — ПОСЛЕДНИМ
+        // ребёнком: топ-слой, move/up драга приходят поверх всех.
+        if self.markdown_preview.drag {
+            root = root.child(self.render_preview_drag_overlay(cx));
         }
         // Контекстное меню дерева (с подложкой) и диалог имён — дети
         // корня (паттерн goto/language overlay, D9.2).

@@ -124,6 +124,11 @@ pub struct BufferTab {
     /// (usize::MAX — правок не было): фильтр устаревших чекпоинтов и
     /// спанов при слиянии (undo/redo — 0: строки правок неизвестны).
     pub(crate) bg_valid_upto: usize,
+    /// Сохранённые метки воркспейса (.settings) применены к вкладке
+    /// (гидратация один раз; сбрасывается при загрузке настроек
+    /// другого воркспейса). Повторная установка поверх ручных правок
+    /// не делается — повторное открытие файла = новая вкладка.
+    pub(crate) marks_hydrated: bool,
 }
 
 impl BufferTab {
@@ -164,6 +169,7 @@ impl BufferTab {
             last_edit_line: None,
             bg_walk_started: false,
             bg_valid_upto: usize::MAX,
+            marks_hydrated: false,
         }
     }
 
@@ -195,6 +201,7 @@ impl BufferTab {
             last_edit_line: None,
             bg_walk_started: false,
             bg_valid_upto: usize::MAX,
+            marks_hydrated: false,
         };
         tab.detect_language_if_warm();
         tab.rescan_line_width();
@@ -367,7 +374,7 @@ impl BufferTab {
         self.apply_tx(tx);
     }
 
-    fn apply_tx(&mut self, tx: editor_core::Transaction) {
+    pub(crate) fn apply_tx(&mut self, tx: editor_core::Transaction) {
         if tx.is_empty() {
             return;
         }
@@ -690,6 +697,26 @@ impl BufferTab {
     pub fn toggle_fold(&mut self, line: usize) {
         if crate::folding::is_foldable(&self.doc, line) {
             self.doc.line_meta_mut().toggle_folded(line);
+            self.bump_view();
+        }
+    }
+
+    /// Применить сохранённое состояние строк воркспейса
+    /// (.settings/workspace.toml): закладки и фолды; строки вне
+    /// диапазона документа (файл изменился извне) — игнорируются.
+    /// Стыкуется с view-версией — фолд-мапа пересоберётся.
+    pub fn apply_line_marks(&mut self, bookmarks: &[usize], folds: &[usize]) {
+        let len = self.doc.len_lines();
+        {
+            let meta = self.doc.line_meta_mut();
+            for &l in bookmarks.iter().filter(|l| **l < len) {
+                meta.set_bookmark(l);
+            }
+            for &l in folds.iter().filter(|l| **l < len) {
+                meta.set_folded(l, true);
+            }
+        }
+        if !bookmarks.is_empty() || !folds.is_empty() {
             self.bump_view();
         }
     }
