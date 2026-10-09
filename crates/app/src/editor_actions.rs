@@ -75,6 +75,32 @@ impl Workspace {
                 .extend(over.iter().map(|&i| (pi, i)));
             self.ask_pending_threshold(window, cx);
         }
+        // CSV (D12.6): файлы без сохранённого выбора (.settings) —
+        // вопрос о разделителе/кавычках (overlay над статус-баром).
+        if !crate::bench::enabled() {
+            let mut csv_tabs: Vec<usize> = Vec::new();
+            for &i in &opened {
+                // Путь и сохранённый выбор — до мутабельного заёма вкладки.
+                let no_saved = self.panes[pi]
+                    .model
+                    .tabs()
+                    .get(i)
+                    .and_then(|t| t.path.clone())
+                    .is_some_and(|p| self.saved_csv_options(&p).is_none());
+                let needs = no_saved
+                    && self.panes[pi]
+                        .model
+                        .tab_mut(i)
+                        .is_some_and(|t| t.is_csv() && !t.csv_asked);
+                if needs {
+                    csv_tabs.push(i);
+                }
+            }
+            if !csv_tabs.is_empty() {
+                self.pending_csv_tabs.extend(csv_tabs.iter().map(|&i| (pi, i)));
+                self.ask_pending_csv(window, cx);
+            }
+        }
         // Фоновая раскраска новых вкладок чекпоинтами (сразу, не
         // дожидаясь прыжков пользователя; workspace.rs).
         for i in &opened {

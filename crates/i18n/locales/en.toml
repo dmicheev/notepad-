@@ -141,6 +141,16 @@ auto_detect = "Auto-detect"
 ui_label = "Interface language:"
 ui_hint = "Restart is not needed; missing keys fall back to English."
 
+[csv]
+title = "CSV options:"
+delimiter = "Delimiter:"
+quote = "Quote:"
+auto = "Auto"
+tab = "Tab"
+none = "None"
+status_auto = "auto"
+status_none = "none"
+
 [font]
 label = "Font:"
 filter_placeholder = "{family} {size} — type to filter…"

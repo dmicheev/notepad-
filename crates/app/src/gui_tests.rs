@@ -740,6 +740,8 @@ fn sort_lines_action_on_selection(cx: &mut TestAppContext) {
 
 /// D11.8 (панель PERFORMANCE): секция отрисована в левой панели,
 /// кадры render-прохода собираются, opens непусты после открытия.
+/// Секция ВНЕ скроллируемого тела — прилеплена к нижней границе
+/// панели (низ секции = верх статус-бара).
 /// Глобальные статы perf разделяются параллельными тестами —
 /// проверяем только устойчивые инварианты.
 #[gpui::test]
@@ -752,6 +754,18 @@ fn perf_panel_renders_stats(cx: &mut TestAppContext) {
     assert!(
         f32::from(bounds.size.width) > 100.0,
         "секция на всю панель: {bounds:?}"
+    );
+    // Верх статус-бара: сегменты (status-message и др.) центрированы
+    // в баре высотой STATUS_H — снимаем центрирование геометрией.
+    let status = cx
+        .debug_bounds("status-message")
+        .expect("статус-бар отрисован");
+    let bar_top = f32::from(status.origin.y)
+        - (crate::geometry::STATUS_H - f32::from(status.size.height)) / 2.0;
+    let perf_bottom = f32::from(bounds.origin.y + bounds.size.height);
+    assert!(
+        (perf_bottom - bar_top).abs() < 1.0,
+        "PERFORMANCE прилеплена к низу панели: perf_bottom={perf_bottom}, bar_top={bar_top}"
     );
     let (total, stats) = crate::perf::frame_snapshot();
     assert!(total > 0, "render-проходы записаны");
@@ -906,6 +920,9 @@ fn editor_with_named_file<'a>(
         // Реальный путь открытия (диалог/сессия): вопрос о подсветке
         // сверх порога ставится здесь (D12.4).
         ws.open_paths(std::slice::from_ref(&path), window, cx);
+        // Вопрос настроек CSV (D12.6) мог открыться — тестам
+        // колонок/шапки он не нужен (диалог-тесты открывают сами).
+        ws.csv_dialog = false;
         ws
     });
     focus_editor(&view, cx);
@@ -1276,6 +1293,111 @@ fn csv_sticky_header_partial_and_plain_files(cx: &mut TestAppContext) {
         cx.debug_bounds("csv-sticky-header").is_some(),
         "полный уход — шапка закреплена"
     );
+}
+
+/// D12.6: открытие CSV спрашивает настройки — overlay с чипами
+/// разделителя/кавычек, префилл — детект по содержимому (`;`-файл);
+/// Esc закрывает, детект остаётся выбором вкладки; в статус-баре —
+/// кликабельный CSV-сегмент.
+#[gpui::test]
+fn csv_open_asks_options_esc_keeps_detected(cx: &mut TestAppContext) {
+    let dir = TempDir::new("csv-ask");
+    let path = dir.write("data.csv", "a;b;c\n1;2;3\n");
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut ws = Workspace::new(cx);
+        ws.open_paths(std::slice::from_ref(&path), window, cx);
+        ws
+    });
+    cx.run_until_parked();
+    let (dialog, options) = cx.update_window_entity(&view, |ws, _w, _cx| {
+        (ws.csv_dialog, ws.model().active().unwrap().csv_options)
+    });
+    assert!(dialog, "открытие CSV спрашивает настройки");
+    assert_eq!(options.delimiter, Some(';'), "детект-префилл разделителя");
+    assert!(cx.debug_bounds("csv-overlay").is_some(), "overlay отрисован");
+    assert!(cx.debug_bounds("csv-chip:;").is_some(), "чип `;` присутствует");
+    assert!(
+        cx.debug_bounds("status-csv").is_some(),
+        "CSV-сегмент в статус-баре"
+    );
+    // Esc — закрыть: детект остаётся, сегмент показывает `;`.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let (dialog, options) = cx.update_window_entity(&view, |ws, _w, _cx| {
+        (ws.csv_dialog, ws.model().active().unwrap().csv_options)
+    });
+    assert!(!dialog, "Esc закрыл overlay");
+    assert_eq!(options.delimiter, Some(';'), "выбор после закрытия жив");
+}
+
+/// D12.6: клик по CSV-сегменту статус-бара переоткрывает настройки;
+/// чип применяется немедленно (живой предпросмотр), выбор
+/// персистится в .settings и переживает закрытие/повторное открытие
+/// файла — без повторного вопроса.
+#[gpui::test]
+fn csv_status_segment_and_persistence(cx: &mut TestAppContext) {
+    let dir = TempDir::new("csv-persist");
+    dir.write("data.csv", "a;b;c\n1;2;3\n");
+    let root = dir.path().to_path_buf();
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut ws = Workspace::new(cx);
+        ws.open_workspace_folder(&root, cx);
+        ws.open_paths(&[root.join("data.csv")], window, cx);
+        ws
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("csv-overlay").is_some(),
+        "вопрос при открытии CSV"
+    );
+    // Клик по чипу `;` — применить + персист (диалог жив: предпросмотр).
+    let chip = cx.debug_bounds("csv-chip:;").expect("чип `;`");
+    cx.simulate_click(center_of(chip), Modifiers::default());
+    cx.run_until_parked();
+    let text =
+        std::fs::read_to_string(root.join(".settings").join("workspace.toml")).unwrap();
+    assert!(
+        text.contains("csv_delimiter = \";\""),
+        "выбор записан в .settings: {text}"
+    );
+    // Esc — закрыть.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let closed = cx.update_window_entity(&view, |ws, _w, _cx| !ws.csv_dialog);
+    assert!(closed, "overlay закрыт");
+
+    // Клик по CSV-сегменту статус-бара — переоткрыть; чип `,` меняет
+    // разделитель немедленно.
+    let seg = cx.debug_bounds("status-csv").expect("CSV-сегмент статус-бара");
+    cx.simulate_click(center_of(seg), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("csv-overlay").is_some(), "клик по сегменту открыл настройки");
+    let chip = cx.debug_bounds("csv-chip:,").expect("чип запятой");
+    cx.simulate_click(center_of(chip), Modifiers::default());
+    cx.run_until_parked();
+    let delimiter = cx.update_window_entity(&view, |ws, _w, _cx| {
+        ws.model().active().unwrap().csv_options.delimiter
+    });
+    assert_eq!(delimiter, Some(','), "чип применился немедленно");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    // Закрыть вкладку и открыть файл снова — сохранённый выбор
+    // применяется молча (гидратация в render), вопрос не повторяется.
+    cx.update_window_entity(&view, |ws, _w, cx| {
+        let ix = ws.model().active_index().unwrap();
+        ws.model_mut().close(ix);
+        ws.model_mut().open_path(root.join("data.csv")).unwrap();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let (dialog, delimiter) = cx.update_window_entity(&view, |ws, _w, _cx| {
+        (ws.csv_dialog, ws.model().active().unwrap().csv_options.delimiter)
+    });
+    assert!(!dialog, "сохранённый выбор — без повторного вопроса");
+    assert_eq!(delimiter, Some(','), "гидратация из .settings");
 }
 
 // ---- Поиск и замена (группа 6) ----
@@ -3389,3 +3511,4 @@ fn select_all_via_hotkey_and_context_menu(cx: &mut TestAppContext) {
         assert_eq!(tab.primary(), &Selection::range(0, 11), "пункт меню выделил всё");
     });
 }
+

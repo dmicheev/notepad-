@@ -10,6 +10,10 @@
 //! [files."notes/idea.txt"]
 //! bookmarks = [2, 7]
 //! folds = [10]
+//!
+//! [files."data/table.csv"]
+//! csv_delimiter = ";"
+//! csv_quote = "\""
 //! ```
 //!
 //! Дерево воркспейса скрытые «.»-записи не показывает (fs_tree) —
@@ -43,11 +47,52 @@ pub(crate) struct FileState {
     /// Свёрнутые строки-заголовки фолдов.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folds: Vec<usize>,
+    /// Разделитель CSV (D12.6): одиночный символ или слово «auto»
+    /// (авто-детект по строке). Отсутствие — явного выбора не было
+    /// (при открытии CSV спросит снова).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csv_delimiter: Option<String>,
+    /// Квотирование CSV: одиночный символ или слово «none» (без
+    /// квотирования). Отсутствие — явного выбора не было.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csv_quote: Option<String>,
 }
 
 impl FileState {
     pub fn is_empty(&self) -> bool {
-        self.bookmarks.is_empty() && self.folds.is_empty()
+        self.bookmarks.is_empty()
+            && self.folds.is_empty()
+            && self.csv_delimiter.is_none()
+            && self.csv_quote.is_none()
+    }
+
+    /// Явный выбор CSV-настроек (D12.6); `None` — выбора не было
+    /// (поля отсутствуют/битые — не ломают открытие).
+    pub fn csv_options(&self) -> Option<editor_core::CsvOptions> {
+        let delimiter = self.csv_delimiter.as_deref().and_then(|s| parse_choice(s, "auto"))?;
+        let quote = self.csv_quote.as_deref().and_then(|s| parse_choice(s, "none"))?;
+        Some(editor_core::CsvOptions { delimiter, quote })
+    }
+
+    /// Поля TOML из явного выбора (обратное преобразование
+    /// `csv_options`; пишет всегда оба поля).
+    pub fn csv_fields(options: editor_core::CsvOptions) -> (Option<String>, Option<String>) {
+        let d = options.delimiter.map(|c| c.to_string()).unwrap_or_else(|| "auto".into());
+        let q = options.quote.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+        (Some(d), Some(q))
+    }
+}
+
+/// Значение поля CSV-выбора: служебное слово (`auto`/`none` → None)
+/// или РОВНО один символ; прочее — None (битая запись = выбора нет).
+fn parse_choice(s: &str, none_word: &str) -> Option<Option<char>> {
+    if s == none_word {
+        return Some(None);
+    }
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(Some(c)),
+        _ => None,
     }
 }
 
@@ -113,6 +158,14 @@ impl Workspace {
         self.tree.as_ref().map(|t| t.root())
     }
 
+    /// Сохранённый выбор CSV-настроек файла (D12.6): `None` — файла
+    /// нет в настройках воркспейса либо выбора не было (спросить).
+    pub(crate) fn saved_csv_options(&self, path: &Path) -> Option<editor_core::CsvOptions> {
+        let root = self.workspace_root()?;
+        let rel = rel_within(path, root)?;
+        self.workspace_settings.files.get(&rel)?.csv_options()
+    }
+
     /// Загрузить настройки воркспейса (открытие/смена воркспейса) и
     /// сбросить гидратацию: новая вселенная меток — вкладки (в т.ч.
     /// оставшиеся от прежнего воркспейса) применяют метки заново.
@@ -164,6 +217,12 @@ impl Workspace {
         for (pi, ti, state) in pending {
             if let Some(tab) = self.panes.get_mut(pi).and_then(|p| p.model.tab_mut(ti)) {
                 tab.apply_line_marks(&state.bookmarks, &state.folds);
+                // Сохранённый выбор CSV (D12.6): применяется молча,
+                // вопрос при открытии не нужен.
+                if let Some(options) = state.csv_options() {
+                    tab.set_csv_options(options);
+                    tab.csv_asked = true;
+                }
             }
         }
     }
@@ -182,11 +241,21 @@ impl Workspace {
             for tab in pane.model.tabs() {
                 let Some(path) = &tab.path else { continue };
                 let Some(rel) = rel_within(path, &root) else { continue };
+                // Явный выбор CSV (D12.6) — только для CSV-вкладок, где
+                // выбор уже сделан (диалог показан/сохранён ранее).
+                let (csv_delimiter, csv_quote) =
+                    if tab.is_csv() && tab.csv_asked {
+                        FileState::csv_fields(tab.csv_options)
+                    } else {
+                        (None, None)
+                    };
                 updated.push((
                     rel,
                     FileState {
                         bookmarks: tab.doc.line_meta().bookmarked_lines(),
                         folds: tab.doc.line_meta().folded_lines(),
+                        csv_delimiter,
+                        csv_quote,
                     },
                 ));
             }
@@ -217,9 +286,9 @@ mod tests {
         let mut settings = WorkspaceSettings::default();
         settings.files.insert(
             "notes/idea.txt".into(),
-            FileState { bookmarks: vec![2, 7], folds: vec![10] },
+            FileState { bookmarks: vec![2, 7], folds: vec![10], ..Default::default() },
         );
-        settings.files.insert("todo.txt".into(), FileState { bookmarks: vec![0], folds: vec![] });
+        settings.files.insert("todo.txt".into(), FileState { bookmarks: vec![0], ..Default::default() });
         save(dir.path(), &settings).unwrap();
 
         let file = settings_path(dir.path());
@@ -233,10 +302,10 @@ mod tests {
         assert_eq!(back.files.len(), 2);
         assert_eq!(
             back.files.get("notes/idea.txt"),
-            Some(&FileState { bookmarks: vec![2, 7], folds: vec![10] })
+            Some(&FileState { bookmarks: vec![2, 7], folds: vec![10], ..Default::default() })
         );
         // Пустые списки не сериализуются (skip_serializing_if).
-        assert_eq!(back.files.get("todo.txt"), Some(&FileState { bookmarks: vec![0], folds: vec![] }));
+        assert_eq!(back.files.get("todo.txt"), Some(&FileState { bookmarks: vec![0], ..Default::default() }));
     }
 
     /// Нет файла — дефолт; битый TOML — дефолт (не паника).
@@ -263,7 +332,7 @@ mod tests {
         assert_eq!(settings.version, 0, "версии нет — дефолт");
         assert_eq!(
             settings.files.get("a.txt"),
-            Some(&FileState { bookmarks: vec![1], folds: vec![] })
+            Some(&FileState { bookmarks: vec![1], ..Default::default() })
         );
     }
 
@@ -274,5 +343,77 @@ mod tests {
         assert_eq!(rel_within(&Path::new("/ws/root/a/b.md"), root), Some("a/b.md".into()));
         assert_eq!(rel_within(&Path::new("/ws/root/notes.md"), root), Some("notes.md".into()));
         assert_eq!(rel_within(&Path::new("/elsewhere/x.md"), root), None);
+    }
+
+    /// CSV-выбор (D12.6): round-trip FileState ↔ CsvOptions; служебные
+    /// слова auto/none; битые значения = выбора не было; отсутствие
+    /// полей = вопроса не было.
+    #[test]
+    fn csv_state_roundtrip_and_parse() {
+        // Полный выбор: `;` + без квотирования.
+        let state = FileState {
+            csv_delimiter: Some(";".into()),
+            csv_quote: Some("none".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.csv_options(),
+            Some(editor_core::CsvOptions { delimiter: Some(';'), quote: None })
+        );
+        // Авто-разделитель + одинарная кавычка.
+        let state = FileState {
+            csv_delimiter: Some("auto".into()),
+            csv_quote: Some("'".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.csv_options(),
+            Some(editor_core::CsvOptions { delimiter: None, quote: Some('\'') })
+        );
+        // Обратное преобразование.
+        let (d, q) = FileState::csv_fields(editor_core::CsvOptions {
+            delimiter: Some('\t'),
+            quote: None,
+        });
+        assert_eq!((d.as_deref(), q.as_deref()), (Some("\t"), Some("none")));
+        let (d, q) =
+            FileState::csv_fields(editor_core::CsvOptions::default());
+        assert_eq!((d.as_deref(), q.as_deref()), (Some("auto"), Some("\"")));
+        // Битые записи — считаем «выбора не было» (не ломают открытие).
+        for bad in ["", "ab", "\"\""] {
+            let state = FileState {
+                csv_delimiter: Some(bad.into()),
+                ..Default::default()
+            };
+            assert_eq!(state.csv_options(), None, "битый разделитель {bad:?}");
+        }
+        // Поля нет — вопроса не было.
+        assert_eq!(FileState::default().csv_options(), None);
+        // Не-пустое состояние с одним только CSV-выбором.
+        assert!(!FileState {
+            csv_delimiter: Some(",".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        // TOML round-trip: выбор переживает save/load.
+        let dir = TempDir::new("ws-settings-csv");
+        let mut settings = WorkspaceSettings::default();
+        settings.files.insert(
+            "data.csv".into(),
+            FileState {
+                csv_delimiter: Some(";".into()),
+                csv_quote: Some("none".into()),
+                ..Default::default()
+            },
+        );
+        save(dir.path(), &settings).unwrap();
+        let text = fs::read_to_string(settings_path(dir.path())).unwrap();
+        assert!(text.contains("csv_delimiter = \";\""), "{text}");
+        assert!(text.contains("csv_quote = \"none\""), "{text}");
+        let back = load(dir.path());
+        assert_eq!(
+            back.files.get("data.csv").and_then(|s| s.csv_options()),
+            Some(editor_core::CsvOptions { delimiter: Some(';'), quote: None })
+        );
     }
 }

@@ -13,9 +13,10 @@ use crate::workspace::Workspace;
 
 impl Workspace {
     /// Левые части статус-бара (единый источник для текста и рендера):
-    /// префикс «кодировка | переводы | Ln/Col | …» + метка языка
+    /// префикс «кодировка | переводы | Ln/Col | …» + метка CSV-настроек
+    /// (кликабельная зона, D12.6; только CSV-вкладки) + метка языка
     /// (кликабельная зона). `None` — вкладок нет.
-    fn status_parts(&self, cx: &gpui::App) -> Option<(String, &'static str)> {
+    fn status_parts(&self, cx: &gpui::App) -> Option<(String, Option<String>, &'static str)> {
         let tab = self.model().active()?;
         let (line, col) = (tab.cursor_line() + 1, tab.cursor_col() + 1);
         let extra = if tab.cursors.len() > 1 {
@@ -26,6 +27,9 @@ impl Workspace {
         } else {
             String::new()
         };
+        let csv = tab
+            .is_csv()
+            .then(|| crate::csv_dialog::csv_status_label(cx, tab.csv_options));
         Some((
             format!(
                 "{}  |  {}  |  Ln {}, Col {}{}  |  ",
@@ -35,6 +39,7 @@ impl Workspace {
                 col,
                 extra,
             ),
+            csv,
             tab.language_label(),
         ))
     }
@@ -44,17 +49,21 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn status_bar_text(&self, cx: &gpui::App) -> String {
         match self.status_parts(cx) {
-            Some((prefix, language)) => format!("{prefix}{language}"),
+            Some((prefix, csv, language)) => match csv {
+                Some(csv) => format!("{prefix}{csv}  |  {language}"),
+                None => format!("{prefix}{language}"),
+            },
             None => "notepad+".to_string(),
         }
     }
 
     pub(crate) fn render_status_bar(&self, cx: &gpui::Context<Self>) -> gpui::Div {
-        // Слева — всегда стандартный блок (язык кликабелен, 5.1);
-        // справа — транзиентное сообщение или «notepad+».
-        let (prefix, language) = self
+        // Слева — всегда стандартный блок (CSV-настройки и язык
+        // кликабельны, D12.6/5.1); справа — транзиентное сообщение или
+        // «notepad+».
+        let (prefix, csv, language) = self
             .status_parts(cx)
-            .unwrap_or_else(|| ("notepad+".to_string(), ""));
+            .unwrap_or_else(|| ("notepad+".to_string(), None, ""));
         let message = self.status_message.clone();
         div()
             .flex()
@@ -74,6 +83,20 @@ impl Workspace {
                     .min_w_0()
                     .overflow_hidden()
                     .child(div().child(prefix))
+                    .when_some(csv, |d, csv| {
+                        d.child(
+                            div()
+                                .id("status-csv")
+                                .debug_selector(|| "status-csv".into())
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(Self::on_status_csv_click),
+                                )
+                                .hover(|d| d.bg(rgb(crate::theme::current().status_lang_hover)))
+                                .child(csv),
+                        )
+                        .child(div().child("  |  "))
+                    })
                     .when(!language.is_empty(), |d| {
                         d.child(
                             div()

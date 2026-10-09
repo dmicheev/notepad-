@@ -157,7 +157,9 @@ fn fmt_mb(bytes: u64) -> String {
 
 impl Workspace {
     /// Секция «PERFORMANCE» для левой панели (D11.8): кадры, память,
-    /// недавние открытия. Сэмпл памяти берётся на каждом рендере секции.
+    /// недавние открытия. Вне скроллируемого тела — прилеплена к
+    /// нижней границе панели. Сэмпл памяти берётся на каждом рендере
+    /// секции.
     pub(crate) fn render_perf_section(&self) -> gpui::Div {
         let (total, frame_stats) = frame_snapshot();
         let mem = memory_snapshot();

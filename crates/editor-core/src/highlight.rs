@@ -70,6 +70,27 @@ pub const CLASS_COLUMN_B: StyleClass = 9;
 pub const CLASS_COLUMN_C: StyleClass = 10;
 pub const CLASS_COLUMN_D: StyleClass = 11;
 
+/// Настройки разбора CSV (D12.6): разделитель полей и символ
+/// квотирования, выбираются пользователем при открытии (диалог) и
+/// меняются из статус-бара. Дефолт — прежнее поведение: авто-разделитель
+/// (большинство `,`/`\t` в строке) + кавычки RFC-4180 `"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CsvOptions {
+    /// Разделитель полей; `None` — авто-детект по строке
+    /// (большинство `\t` против `,`, ничья → запятая).
+    pub delimiter: Option<char>,
+    /// Символ квотирования (удвоение внутри поля — экранированная
+    /// кавычка, разделитель внутри поля не режет); `None` —
+    /// квотирования нет (разделитель режет всегда).
+    pub quote: Option<char>,
+}
+
+impl Default for CsvOptions {
+    fn default() -> Self {
+        CsvOptions { delimiter: None, quote: Some('"') }
+    }
+}
+
 /// Класс колонки №`col` (ротация 4 цветов).
 fn column_class(col: usize) -> StyleClass {
     match col % 4 {
@@ -193,6 +214,8 @@ pub struct HighlightEngine {
     /// CSV/TSV-режим (D12.4): спаны строит `csv_spans` (колонки
     /// чередуются цветами), syntect-парсер не гоняется.
     csv: bool,
+    /// Настройки разбора CSV (D12.6): разделитель/кавычки.
+    csv_options: CsvOptions,
     /// Кэш спанов: строка → цветовые диапазоны (декорированные строки).
     spans: HashMap<usize, Arc<Vec<Span>>>,
     /// Чекпоинты + стеки окна: граница строки → состояние разбора.
@@ -207,6 +230,7 @@ impl Default for HighlightEngine {
         HighlightEngine {
             syntax: None,
             csv: false,
+            csv_options: CsvOptions::default(),
             spans: HashMap::new(),
             states: BTreeMap::new(),
             budget: CATCH_UP_BUDGET,
@@ -239,6 +263,25 @@ impl HighlightEngine {
         self.syntax = syntax;
         self.csv = syntax.is_some_and(|s| s.name == "CSV");
         self.reset_cache();
+    }
+
+    /// Текущие настройки CSV-разбора (D12.6).
+    pub fn csv_options(&self) -> CsvOptions {
+        self.csv_options
+    }
+
+    /// Сменить настройки CSV (разделитель/кавычки, D12.6): меняет
+    /// разбиение на колонки — кэш спанов сбрасывается, переразбор
+    /// ленивый (ensure_window; CSV-строка дешёвая). Вне CSV-режима
+    /// просто запоминается (применится при смене грамматики).
+    pub fn set_csv_options(&mut self, options: CsvOptions) {
+        if self.csv_options == options {
+            return;
+        }
+        self.csv_options = options;
+        if self.csv {
+            self.reset_cache();
+        }
     }
 
     /// Полный сброс кэшей (undo/redo: неизвестны строки правок —
@@ -412,7 +455,7 @@ impl HighlightEngine {
             return;
         }
         let spans = if self.csv {
-            csv_spans(&text)
+            csv_spans(&text, self.csv_options)
         } else {
             let ops = state.parse.parse_line(&text, syntax_set());
             let empty = Vec::new();
@@ -506,20 +549,28 @@ fn char_pos(char_of: &[usize], byte: usize) -> usize {
 }
 
 /// Цветовые диапазоны CSV/TSV-строки (D12.4): колонки чередуются 4
-/// цветами (ротация по индексу). Разделитель — большинством в строке
-/// (`,` для CSV, `\t` для TSV; ничья → запятая), кавычки RFC-4180:
-/// запятая/таб внутри `"…"` не разделяют, `""` — экранированная
-/// кавычка. Пустые поля не красятся, но индекс колонки считают.
-/// Координаты — char, без терминатора. Подсветка построчная
-/// (stateless) — состояние разбора не меняется.
-fn csv_spans(text: &str) -> Vec<Span> {
+/// цветами (ротация по индексу). Настройки — [`CsvOptions`] (D12.6):
+/// разделитель задан — режет им везде; авто — большинством в строке
+/// (`,` для CSV, `\t` для TSV; ничья → запятая). Кавычки RFC-4180 с
+/// выбранным символом: разделитель внутри `q…q` не разделяет, `qq` —
+/// экранированная кавычка; `None` — квотирования нет. Пустые поля не
+/// красятся, но индекс колонки считают. Координаты — char, без
+/// терминатора. Подсветка построчная (stateless) — состояние разбора
+/// не меняется.
+fn csv_spans(text: &str, options: CsvOptions) -> Vec<Span> {
     let content = text.strip_suffix('\n').unwrap_or(text);
     if content.is_empty() {
         return Vec::new();
     }
-    let commas = content.matches(',').count();
-    let tabs = content.matches('\t').count();
-    let sep = if tabs > commas { '\t' } else { ',' };
+    let sep = match options.delimiter {
+        Some(c) => c,
+        None => {
+            let commas = content.matches(',').count();
+            let tabs = content.matches('\t').count();
+            if tabs > commas { '\t' } else { ',' }
+        }
+    };
+    let quote = options.quote;
     let mut spans: Vec<Span> = Vec::new();
     let mut col = 0usize;
     let mut field_start = 0usize; // char-позиция начала поля
@@ -527,19 +578,26 @@ fn csv_spans(text: &str) -> Vec<Span> {
     let mut in_quotes = false;
     let mut chars = content.chars().peekable();
     while let Some(c) = chars.next() {
-        match c {
-            '"' if !in_quotes => in_quotes = true,
-            '"' if chars.peek() == Some(&'"') => {
-                chars.next(); // экранированная ""
+        // Кавычка (только с заданным символом квотирования): вход в
+        // поле, удвоение — экранированная кавычка, выход.
+        if let Some(q) = quote
+            && c == q
+        {
+            if !in_quotes {
+                in_quotes = true;
+            } else if chars.peek() == Some(&q) {
+                chars.next(); // экранированная qq
                 char_idx += 1;
+            } else {
+                in_quotes = false;
             }
-            '"' => in_quotes = false,
-            c if c == sep && !in_quotes => {
-                push_column(&mut spans, field_start, char_idx, col);
-                col += 1;
-                field_start = char_idx + 1;
-            }
-            _ => {}
+            char_idx += 1;
+            continue;
+        }
+        if c == sep && !in_quotes {
+            push_column(&mut spans, field_start, char_idx, col);
+            col += 1;
+            field_start = char_idx + 1;
         }
         char_idx += 1;
     }
@@ -1055,6 +1113,66 @@ mod tests {
         assert_eq!(classes(&e, &d, 0).len(), 2);
         assert_eq!(e.spans(1).map(|s| s.len()), Some(0), "кап длины");
         assert_eq!(classes(&e, &d, 2).len(), 2, "строка после капа красится");
+    }
+
+    /// Явный разделитель (D12.6): `;`-файл без авто-детекта — запятые
+    /// внутри поля больше не режут, `;` режут.
+    #[test]
+    fn csv_explicit_delimiter() {
+        let mut e = csv_engine();
+        e.set_csv_options(CsvOptions { delimiter: Some(';'), quote: Some('"') });
+        let d = doc("a;b,c;d\n");
+        e.ensure_window(&d, 0, 1);
+        // Три колонки: «a», «b,c», «d» — запятая внутри поля.
+        assert_eq!(
+            classes(&e, &d, 0),
+            vec![(0, 1, CLASS_COLUMN_A), (2, 5, CLASS_COLUMN_B), (6, 7, CLASS_COLUMN_C)]
+        );
+    }
+
+    /// Квотирование выключено (D12.6): кавычки — обычные символы,
+    /// разделитель режет и внутри `"…"`.
+    #[test]
+    fn csv_quote_disabled_splits_inside_quotes() {
+        let mut e = csv_engine();
+        e.set_csv_options(CsvOptions { delimiter: Some(','), quote: None });
+        let d = doc("\"a,b\",c\n");
+        e.ensure_window(&d, 0, 1);
+        // Три колонки: `"a`, `b"`, `c`.
+        assert_eq!(
+            classes(&e, &d, 0),
+            vec![(0, 2, CLASS_COLUMN_A), (3, 5, CLASS_COLUMN_B), (6, 7, CLASS_COLUMN_C)]
+        );
+    }
+
+    /// Нестандартный символ квотирования (`'`): разделитель внутри
+    /// `'…'` не делит, `''` — экранированная кавычка.
+    #[test]
+    fn csv_single_quote_char() {
+        let mut e = csv_engine();
+        e.set_csv_options(CsvOptions { delimiter: Some(','), quote: Some('\'') });
+        let d = doc("'a,b',c\n");
+        e.ensure_window(&d, 0, 1);
+        assert_eq!(
+            classes(&e, &d, 0),
+            vec![(0, 5, CLASS_COLUMN_A), (6, 7, CLASS_COLUMN_B)]
+        );
+    }
+
+    /// Смена настроек инвалидирует кэш: те же строки перекрашиваются
+    /// без правок документа.
+    #[test]
+    fn csv_options_change_reparse() {
+        let mut e = csv_engine();
+        let d = doc("a;b,c;d\n");
+        e.ensure_window(&d, 0, 1);
+        assert_eq!(classes(&e, &d, 0).len(), 2, "авто: запятая");
+        e.set_csv_options(CsvOptions { delimiter: Some(';'), quote: Some('"') });
+        e.ensure_window(&d, 0, 1);
+        assert_eq!(classes(&e, &d, 0).len(), 3, "явный `;` перекрасил");
+        // Тот же набор — no-op (кэш живёт).
+        e.set_csv_options(CsvOptions { delimiter: Some(';'), quote: Some('"') });
+        assert_eq!(classes(&e, &d, 0).len(), 3);
     }
 
     /// Детект .csv/.tsv → грамматика CSV (синтакс-модуль).

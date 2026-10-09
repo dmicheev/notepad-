@@ -5,6 +5,7 @@
 mod actions;
 mod bench;
 mod buffer_tab;
+mod csv_dialog;
 mod editor_actions;
 mod editor_mouse;
 mod editor_view;
@@ -299,6 +300,10 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>, startup: V
                     // Восстановленные вкладки сверх порога — в очередь
                     // вопроса (диалог после создания окна, D12.4).
                     ws.queue_threshold_ask();
+                    // CSV без сохранённого выбора — в очередь вопроса о
+                    // разделителе/кавычках (D12.6; после открытия
+                    // воркспейса ниже — сохранённый выбор не спрашивается).
+                    ws.queue_csv_ask();
                     // Последний воркспейс (7.4): дерево + наблюдатель
                     // (bench-режим сессию не восстанавливает — путь
                     // остаётся None).
@@ -324,6 +329,8 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>, startup: V
                             // Порог подсветки (5.3/D12.4): вопрос
                             // пользователю (не в bench-режиме).
                             ws.queue_threshold_ask();
+                            // CSV (D12.6): вопрос о разделителе/кавычках.
+                            ws.queue_csv_ask();
                         }
                     }
                     // Пути из командной строки («Открыть с помощью»
@@ -353,6 +360,8 @@ fn open_workspace_window(cx: &mut App, restore: Option<SessionState>, startup: V
             // Вопрос о подсветке файлов сверх порога, накопленных при
             // восстановлении сессии/NOTEPAD_OPEN (D12.4).
             ws.ask_pending_threshold(window, cx);
+            // Вопрос о настройках CSV из той же очереди (D12.6).
+            ws.ask_pending_csv(window, cx);
             // Красная кнопка: сохранить сессию и разрешить закрытие;
             // приложение продолжает жить (dock-reopen откроет окно).
             let entity = cx.entity();

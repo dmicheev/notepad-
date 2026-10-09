@@ -31,7 +31,7 @@ pub use ropey;
 
 pub use document::Document;
 pub use encoding::{Encoding, FileFormat, LineEnding, LineEndingStats};
-pub use highlight::{HighlightEngine, Span, StyleClass};
+pub use highlight::{CsvOptions, HighlightEngine, Span, StyleClass};
 pub use json::{JsonError, JsonStyle, format_json};
 pub use line_meta::LineMeta;
 pub use line_ops::{change_case, dedupe_lines, remove_empty_lines, sort_lines, CaseMode};

@@ -84,6 +84,13 @@ pub struct Workspace {
     /// handle (паттерн goto_dialog).
     pub language_input: Option<String>,
     pub(crate) language_focus: FocusHandle,
+    /// Overlay настроек CSV (D12.6): разделитель/кавычки; фокус —
+    /// отдельный handle (Esc закрывает, клавиши не идут в редактор).
+    pub csv_dialog: bool,
+    pub(crate) csv_focus: FocusHandle,
+    /// CSV-вкладки без сохранённого выбора, ожидающие вопроса при
+    /// открытии (D12.6; панель, индекс) — паттерн pending_threshold.
+    pub(crate) pending_csv_tabs: Vec<(usize, usize)>,
     /// Панель поиска/замены (6.1–6.5, D13): состояние + результаты;
     /// фокус — отдельный handle (ловушка D9.2 — клавиши панели не
     /// доходят до handle_key редактора).
@@ -174,6 +181,9 @@ impl Workspace {
             goto_focus: cx.focus_handle(),
             language_input: None,
             language_focus: cx.focus_handle(),
+            csv_dialog: false,
+            csv_focus: cx.focus_handle(),
+            pending_csv_tabs: Vec::new(),
             search: None,
             search_focus: cx.focus_handle(),
             syntax_warmup_scheduled: false,
@@ -1026,6 +1036,9 @@ impl Render for Workspace {
         }
         if self.language_input.is_some() {
             root = root.child(self.render_language_overlay(cx));
+        }
+        if self.csv_dialog {
+            root = root.child(self.render_csv_overlay(cx));
         }
         if self.font_dialog.is_some() {
             root = root.child(self.render_font_overlay(cx));

@@ -106,6 +106,12 @@ pub struct BufferTab {
     pub language: TabLanguage,
     /// Движок подсветки: кэши спанов/стеков видимых строк (D12.1).
     pub highlight: HighlightEngine,
+    /// Настройки CSV (D12.6): разделитель/кавычки — вопрос при
+    /// открытии и переключатель статус-бара; дефолт — авто/`"`.
+    pub csv_options: editor_core::CsvOptions,
+    /// Диалог настроек CSV уже показывался для вкладки в этой сессии
+    /// (повторно не спрашиваем; выбор персистится в .settings).
+    pub(crate) csv_asked: bool,
     /// Версия вида: растёт при любом изменении, влияющем на рендер
     /// строк (правки, undo/redo, фолды). Ключ кэша мапы visible→real
     /// в виджете (4.5/D9.5). Закладки мапу не меняют и версию не трогают.
@@ -165,6 +171,8 @@ impl BufferTab {
             max_seen_cols: 0,
             language: TabLanguage::default(),
             highlight: HighlightEngine::new(),
+            csv_options: editor_core::CsvOptions::default(),
+            csv_asked: false,
             view_version: 0,
             last_edit_line: None,
             bg_walk_started: false,
@@ -197,6 +205,8 @@ impl BufferTab {
             max_seen_cols: 0,
             language,
             highlight: HighlightEngine::new(),
+            csv_options: editor_core::CsvOptions::default(),
+            csv_asked: false,
             view_version: 0,
             last_edit_line: None,
             bg_walk_started: false,
@@ -308,6 +318,47 @@ impl BufferTab {
             .as_deref()
             .and_then(|p| p.extension().and_then(|e| e.to_str()))
             .is_some_and(|e| e.eq_ignore_ascii_case("csv") || e.eq_ignore_ascii_case("tsv"))
+    }
+
+    /// Сменить настройки CSV (D12.6): применяются к движку (сброс кэша
+    /// спанов — внутри движка), колонки перекрашиваются лениво.
+    pub fn set_csv_options(&mut self, options: editor_core::CsvOptions) {
+        if self.csv_options == options {
+            return;
+        }
+        self.csv_options = options;
+        self.highlight.set_csv_options(options);
+    }
+
+    /// Детект CSV-опций по началу документа (префилл диалога, D12.6):
+    /// среди кандидатов `,` `;` `\t` `|` — максимум вхождений вне
+    /// кавычек `"` на первых строках (ничья/ноль — авто); кавычек `"`
+    /// нет — квотирование не предполагается.
+    pub fn detect_csv_options(&self) -> editor_core::CsvOptions {
+        const CANDIDATES: [char; 4] = [',', ';', '\t', '|'];
+        const MAX_LINES: usize = 20;
+        let mut counts = [0usize; 4];
+        let mut has_quote = false;
+        let mut in_quotes = false;
+        for l in 0..self.doc.len_lines().min(MAX_LINES) {
+            for c in self.doc.line_content(l).chars() {
+                if c == '"' {
+                    has_quote = true;
+                    in_quotes = !in_quotes;
+                } else if !in_quotes
+                    && let Some(i) = CANDIDATES.iter().position(|&d| d == c)
+                {
+                    counts[i] += 1;
+                }
+            }
+        }
+        let delimiter = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|&(i, &n)| (n, CANDIDATES.len() - i)) // ничья — раньше в списке
+            .filter(|&(_, &n)| n > 0)
+            .map(|(i, _)| CANDIDATES[i]);
+        editor_core::CsvOptions { delimiter, quote: has_quote.then_some('"') }
     }
 
     /// Синхронизировать грамматику движка с состоянием языка.
@@ -1768,5 +1819,42 @@ mod tests {
             t.doc = Document::from_text(s);
             t
         }
+    }
+
+    /// Детект CSV-опций (D12.6): `;`-файл — точка с запятой; кавычек
+    /// нет — квотирование не предполагается; пустой документ — авто.
+    #[test]
+    fn csv_options_detect() {
+        let t = BufferTab::from_text("a;b;c\n1;2;3\n4;5;6\n");
+        assert_eq!(
+            t.detect_csv_options(),
+            editor_core::CsvOptions { delimiter: Some(';'), quote: None }
+        );
+        let t = BufferTab::from_text("\"x,y\",z\n\"1,2\",3\n");
+        assert_eq!(
+            t.detect_csv_options(),
+            editor_core::CsvOptions { delimiter: Some(','), quote: Some('"') }
+        );
+        let t = BufferTab::from_text("");
+        assert_eq!(
+            t.detect_csv_options(),
+            editor_core::CsvOptions { delimiter: None, quote: None }
+        );
+    }
+
+    /// Смена CSV-опций вкладки синхронизируется с движком подсветки.
+    #[test]
+    fn csv_options_sync_engine() {
+        let syntax = editor_core::syntax::detect_by_extension("csv").unwrap();
+        let mut t = BufferTab::from_text("a;b\n");
+        t.set_language(Some(syntax));
+        assert_eq!(t.highlight.csv_options(), editor_core::CsvOptions::default());
+        let opts = editor_core::CsvOptions { delimiter: Some(';'), quote: Some('"') };
+        t.set_csv_options(opts);
+        assert_eq!(t.csv_options, opts);
+        assert_eq!(t.highlight.csv_options(), opts, "движок получил те же опции");
+        // Повтор той же установки — no-op.
+        t.set_csv_options(opts);
+        assert_eq!(t.highlight.csv_options(), opts);
     }
 }

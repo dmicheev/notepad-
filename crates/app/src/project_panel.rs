@@ -99,11 +99,11 @@ impl Workspace {
         if let Some(search_section) = self.render_search_section(cx) {
             body = body.child(search_section);
         }
-        // Секция live-статистики производительности и памяти (D11.8).
-        body = body.child(self.render_perf_section());
-        // Обёртка панели: размеры/фон здесь, тело скроллится внутри,
-        // полоса — absolute-оверлей правого края; move/up обёртки
-        // ведут драг ползунка (scrollbar.rs).
+        // Обёртка панели: размеры/фон здесь; СКРОЛЛИРУЕМАЯ ЗОНА (тело +
+        // полоса-оверлей правого края) занимает всё место, секция
+        // PERFORMANCE — ПОСЛЕ неё, не скроллится: прилеплена к нижней
+        // границе панели. move/up обёртки ведут драг ползунка
+        // (scrollbar.rs).
         div()
             .id("project-panel-zone")
             .relative()
@@ -123,7 +123,16 @@ impl Workspace {
                     this.on_scrollbar_drag_up(event, window, cx);
                 }),
             )
-            .child(body)
-            .child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Panel, cx))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(body)
+                    .child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Panel, cx)),
+            )
+            .child(self.render_perf_section().flex_shrink_0())
     }
 }
