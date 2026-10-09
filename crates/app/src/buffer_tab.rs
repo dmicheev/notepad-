@@ -374,6 +374,50 @@ impl BufferTab {
         self.apply_tx(tx);
     }
 
+    /// Текст всех выделений для копирования: диапазоны в порядке
+    /// документа, несколько курсоров — через '\n' (стиль VS Code).
+    /// None — выделяемого текста нет.
+    pub fn copy_text(&self) -> Option<String> {
+        let mut ranges: Vec<(usize, usize)> = self
+            .cursors
+            .iter()
+            .filter(|s| !s.is_caret())
+            .map(|s| (s.start, s.end))
+            .collect();
+        if ranges.is_empty() {
+            return None;
+        }
+        ranges.sort_unstable();
+        Some(
+            ranges
+                .iter()
+                .map(|&(a, b)| self.doc.slice_str(a, b))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Cut: тот же текст, что copy, затем удаление всех выделений
+    /// (каретки не трогаем) одной транзакцией — один шаг undo.
+    pub fn cut_text(&mut self) -> Option<String> {
+        let text = self.copy_text()?;
+        let tx = editor_core::Transaction::from_edits(
+            self.cursors
+                .iter()
+                .filter(|s| !s.is_caret())
+                .map(|s| editor_core::Edit::delete(s.start, s.end))
+                .collect(),
+        );
+        self.apply_tx(tx);
+        Some(text)
+    }
+
+    /// Paste: вставка во все курсоры (как ввод с клавиатуры: выделение
+    /// заменяется, каретки смещаются за вставленный текст).
+    pub fn paste_text(&mut self, text: &str) {
+        self.insert_text(text);
+    }
+
     pub(crate) fn apply_tx(&mut self, tx: editor_core::Transaction) {
         if tx.is_empty() {
             return;
@@ -1055,6 +1099,37 @@ mod tests {
         let mut t = BufferTab::untitled();
         let err = t.save().unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// Буфер обмена: copy без выделения — None; copy возвращает текст
+    /// диапазона; cut удаляет выделение одним undo-шагом; paste
+    /// вставляет во все курсоры.
+    #[test]
+    fn clipboard_copy_cut_paste() {
+        let mut t = BufferTab::from_text("hello world");
+        // Нет выделения — копировать нечего.
+        assert_eq!(t.copy_text(), None);
+
+        // Copy диапазона: текст без изменения документа.
+        t.set_cursors(vec![Selection::range(6, 11)]);
+        assert_eq!(t.copy_text().as_deref(), Some("world"));
+        assert_eq!(t.doc.text(), "hello world");
+
+        // Cut: тот же текст, документ изменён, один undo возвращает.
+        assert_eq!(t.cut_text().as_deref(), Some("world"));
+        assert_eq!(t.doc.text(), "hello ");
+        assert!(t.undo());
+        assert_eq!(t.doc.text(), "hello world");
+
+        // Paste замены выделения.
+        t.set_cursors(vec![Selection::range(0, 5)]);
+        t.paste_text("goodbye");
+        assert_eq!(t.doc.text(), "goodbye world");
+
+        // Мульти-курсор: выделения в порядке документа через '\n'.
+        let mut t = BufferTab::from_text("aaa bbb ccc");
+        t.set_cursors(vec![Selection::range(8, 11), Selection::range(0, 3)]);
+        assert_eq!(t.copy_text().as_deref(), Some("aaa\nccc"));
     }
 
     /// Редактирование через editor-core: ввод/undo/redo, каретка

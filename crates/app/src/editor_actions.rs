@@ -416,6 +416,31 @@ impl Workspace {
         self.with_active_tab(|tab| { tab.redo(); }, cx);
     }
 
+    // ---- Буфер обмена (Cmd+C/X/V): системный клипборд gpui ----
+
+    /// Cmd+C: текст выделений активной вкладки в клипборд.
+    pub(crate) fn on_copy(&mut self, _: &CopyText, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.model().active().and_then(|t| t.copy_text()) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Cmd+X: текст выделений в клипборд + удаление выделений.
+    pub(crate) fn on_cut(&mut self, _: &CutText, _window: &mut Window, cx: &mut Context<Self>) {
+        let cut = self.model_mut().active_mut().and_then(|t| t.cut_text());
+        if let Some(text) = cut {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            cx.notify();
+        }
+    }
+
+    /// Cmd+V: вставка текста клипборда во все курсоры активной вкладки.
+    pub(crate) fn on_paste(&mut self, _: &PasteText, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.with_active_tab(|tab| tab.paste_text(&text), cx);
+        }
+    }
+
     // ---- Клавиатурный ввод редактора (plain-клавиши; Cmd/Ctrl —
     // действия выше; список клавиш — D9.2/D9.3) ----
 

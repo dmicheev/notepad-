@@ -8,6 +8,9 @@ actions!(
     notepad,
     [
         OpenFile, OpenWorkspace, SaveFile, SaveFileAs, CloseTab, Undo, Redo, Quit, GoToLine,
+        // Буфер обмена (CopyText — не `Copy`: конфликт с std-трейтом
+        // при glob-импорте в модулях с derive(Copy)).
+        CopyText, CutText, PasteText,
         AddNextMatch, ToggleBookmark, NextBookmark, PrevBookmark, FoldAll, UnfoldAll,
         SortAsc, SortDesc, SortAscIgnoreCase, SortDescIgnoreCase,
         RemoveDuplicateLines, RemoveEmptyLines,

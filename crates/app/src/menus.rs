@@ -35,12 +35,16 @@ pub(crate) fn build(cx: &gpui::App) -> Vec<Menu> {
                 MenuItem::action(t("menu.file.close_tab"), CloseTab),
             ],
         },
-        // Правка: undo/redo (2.4) — стандартное место.
+        // Правка: undo/redo (2.4) и буфер обмена — стандартное место.
         Menu {
             name: t("menu.name.edit").into(),
             items: vec![
                 MenuItem::action(t("menu.edit.undo"), Undo),
                 MenuItem::action(t("menu.edit.redo"), Redo),
+                MenuItem::separator(),
+                MenuItem::action(t("menu.edit.copy"), CopyText),
+                MenuItem::action(t("menu.edit.cut"), CutText),
+                MenuItem::action(t("menu.edit.paste"), PasteText),
             ],
         },
         // Навигация: переход к строке (4.2) и закладки (4.4).
