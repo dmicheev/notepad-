@@ -793,7 +793,7 @@ impl Workspace {
                 (crate::i18n::t(cx, "tree.rename_title"), old_name.to_string())
             }
         };
-        div()
+        let dialog = div()
             .absolute()
             // Поверх левой панели (подобрано вручную, паттерн goto).
             .top(px(44.0))
@@ -812,6 +812,9 @@ impl Workspace {
             .shadow_md()
             .track_focus(&self.tree_focus)
             .on_key_down(cx.listener(Self::handle_tree_dialog_key))
+            // Клик внутри не доходит до подложки.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(div().text_color(rgb(crate::theme::current().dim)).child(title))
             .child(
                 div().text_color(rgb(if dialog.input.is_empty() { crate::theme::current().dim } else { crate::theme::current().text }))
@@ -826,7 +829,30 @@ impl Workspace {
                     .text_size(px(10.0))
                     .text_color(rgb(crate::theme::current().dim))
                     .child(crate::i18n::t(cx, "tree.dialog_hint")),
+            );
+        // Подложка: клик мимо диалога закрывает (Esc-синоним).
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.tree_dialog = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e, window, cx| {
+                    this.tree_dialog = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .child(dialog)
     }
 }
 

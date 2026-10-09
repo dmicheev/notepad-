@@ -418,6 +418,23 @@ impl BufferTab {
         self.insert_text(text);
     }
 
+    /// Заменить ВЕСЬ текст документа одной транзакцией (форматтеры
+    /// JSON): один шаг undo, каретка в начало. Одинаковый текст —
+    /// no-op (dirty не ставится).
+    pub fn replace_all_text(&mut self, text: &str) {
+        if self.doc.text() == text {
+            return;
+        }
+        let tx = editor_core::Transaction::from_edits(vec![editor_core::Edit {
+            start: 0,
+            end: self.doc.len_chars(),
+            text: text.to_string(),
+        }]);
+        self.apply_tx(tx);
+        self.cursors = vec![Selection::caret(0)];
+        self.goal_col = None;
+    }
+
     pub(crate) fn apply_tx(&mut self, tx: editor_core::Transaction) {
         if tx.is_empty() {
             return;
@@ -604,6 +621,29 @@ impl BufferTab {
         self.goal_col = None;
         let pos = self.clamp_pos(line, col);
         self.cursors = vec![Selection::caret(pos)];
+    }
+
+    /// Select All (Cmd+A / контекстное меню): единственное выделение
+    /// всего документа, голова в конец.
+    pub fn select_all(&mut self) {
+        let len = self.doc.len_chars();
+        self.cursors = vec![Selection::range(0, len)];
+        self.goal_col = None;
+    }
+
+    /// Правый клик (контекстное меню): позиция клика внутри выделения —
+    /// выделение сохраняется (Copy скопирует его); иначе каретка в
+    /// позицию клика. Возвращает строку под кликом (для закладки).
+    pub fn right_click_anchor(&mut self, line: usize, col: usize) -> usize {
+        let pos = self.clamp_pos(line, col);
+        let inside_selection = self
+            .cursors
+            .iter()
+            .any(|s| !s.is_caret() && s.start <= pos && pos <= s.end);
+        if !inside_selection {
+            self.set_caret_at(line, col);
+        }
+        self.cursor_line()
     }
 
     /// Расширение выделения до позиции клика/драга: якорь главной
@@ -1130,6 +1170,23 @@ mod tests {
         let mut t = BufferTab::from_text("aaa bbb ccc");
         t.set_cursors(vec![Selection::range(8, 11), Selection::range(0, 3)]);
         assert_eq!(t.copy_text().as_deref(), Some("aaa\nccc"));
+    }
+
+    /// Select All: единственное выделение [0..len), голова в конец.
+    #[test]
+    fn select_all_covers_document() {
+        let mut t = BufferTab::from_text("hello\nworld");
+        t.set_caret_at(1, 2);
+        t.select_all();
+        assert_eq!(t.primary(), &Selection::range(0, 11));
+        assert!(!t.primary().is_caret());
+        // Copy после select all — весь текст (вместе с переносом).
+        assert_eq!(t.copy_text().as_deref(), Some("hello\nworld"));
+        // Cut очищает документ целиком, undo возвращает.
+        assert_eq!(t.cut_text().as_deref(), Some("hello\nworld"));
+        assert_eq!(t.doc.text(), "");
+        assert!(t.undo());
+        assert_eq!(t.doc.text(), "hello\nworld");
     }
 
     /// Редактирование через editor-core: ввод/undo/redo, каретка

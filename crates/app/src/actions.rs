@@ -10,11 +10,13 @@ actions!(
         OpenFile, OpenWorkspace, SaveFile, SaveFileAs, CloseTab, Undo, Redo, Quit, GoToLine,
         // Буфер обмена (CopyText — не `Copy`: конфликт с std-трейтом
         // при glob-импорте в модулях с derive(Copy)).
-        CopyText, CutText, PasteText,
+        CopyText, CutText, PasteText, SelectAll,
         AddNextMatch, ToggleBookmark, NextBookmark, PrevBookmark, FoldAll, UnfoldAll,
         SortAsc, SortDesc, SortAscIgnoreCase, SortDescIgnoreCase,
         RemoveDuplicateLines, RemoveEmptyLines,
         UpperCase, LowerCase, TitleCase, SentenceCase,
+        // JSON-форматтеры (поддержка JSON): читаемый вид и компактный стиль.
+        FormatJson, MinifyJson,
         FindInFile, FindInTabs, FindInFolder,
         NewFile, NewFolder, RenameNode, DeleteNode,
         // Split view (8.1/D15.1).

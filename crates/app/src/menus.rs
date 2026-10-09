@@ -45,6 +45,7 @@ pub(crate) fn build(cx: &gpui::App) -> Vec<Menu> {
                 MenuItem::action(t("menu.edit.copy"), CopyText),
                 MenuItem::action(t("menu.edit.cut"), CutText),
                 MenuItem::action(t("menu.edit.paste"), PasteText),
+                MenuItem::action(t("menu.edit.select_all"), SelectAll),
             ],
         },
         // Навигация: переход к строке (4.2) и закладки (4.4).
@@ -114,6 +115,9 @@ pub(crate) fn build(cx: &gpui::App) -> Vec<Menu> {
                 MenuItem::action(t("menu.text.lower"), LowerCase),
                 MenuItem::action(t("menu.text.title"), TitleCase),
                 MenuItem::action(t("menu.text.sentence"), SentenceCase),
+                MenuItem::separator(),
+                MenuItem::action(t("menu.text.json_pretty"), FormatJson),
+                MenuItem::action(t("menu.text.json_minify"), MinifyJson),
             ],
         },
         // Справка: справочник сочетаний (8.5, Cmd+/).

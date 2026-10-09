@@ -150,7 +150,7 @@ impl Workspace {
                     .child(name),
             );
         }
-        div()
+        let overlay = div()
             .id("language-overlay")
             .absolute()
             .bottom(px(crate::geometry::STATUS_H + 8.0))
@@ -168,6 +168,10 @@ impl Workspace {
             .shadow_md()
             .track_focus(&self.language_focus)
             .on_key_down(cx.listener(Self::handle_language_key))
+            // Клик внутри (в т.ч. полоса скролла — ходка драга начинается
+            // с mouse_down) не долетает до подложки.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_move(cx.listener(
                 |this, event: &gpui::MouseMoveEvent, window, cx| {
                     this.on_scrollbar_drag_move(event, window, cx);
@@ -207,7 +211,30 @@ impl Workspace {
                     .overflow_y_scroll()
                     .track_scroll(&self.language_scroll),
             )
-            .child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Language, cx))
+            .child(self.render_vertical_scrollbar(crate::scrollbar::ScrollTarget::Language, cx));
+        // Подложка: клик мимо диалога закрывает (Esc-синоним).
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.language_input = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e, window, cx| {
+                    this.language_input = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
             .into_any_element()
     }
 }

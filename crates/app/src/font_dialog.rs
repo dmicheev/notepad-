@@ -186,7 +186,7 @@ impl Workspace {
                     .child(format!("{size}")),
             );
         }
-        div()
+        let overlay = div()
             .id("font-overlay")
             .absolute()
             .bottom(px(crate::geometry::STATUS_H + 8.0))
@@ -204,6 +204,9 @@ impl Workspace {
             .shadow_md()
             .track_focus(&self.font_focus)
             .on_key_down(cx.listener(Self::handle_font_key))
+            // Клик внутри (в т.ч. полоса скролла) не доходит до подложки.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_move(cx.listener(
                 |this, event: &gpui::MouseMoveEvent, window, cx| {
                     this.on_scrollbar_drag_move(event, window, cx);
@@ -253,7 +256,30 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll(),
             )
-            .child(sizes_row)
+            .child(sizes_row);
+        // Подложка: клик мимо диалога закрывает (Esc-синоним).
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.font_dialog = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e, window, cx| {
+                    this.font_dialog = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
             .into_any_element()
     }
 }

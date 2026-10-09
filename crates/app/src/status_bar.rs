@@ -1,7 +1,10 @@
-//! Статус-бар (3.5/D8.5 + 5.1): слева транзиентное сообщение ИЛИ
-//! кодировка, переводы строк, позиция ГЛАВНОГО курсора, число курсоров,
-//! язык (кликабельный — оверлей выбора языка 5.1); справа — «notepad+».
-//! Обновление — на каждый cx.notify().
+//! Статус-бар: СЛЕВА стабильный блок — кодировка, переводы строк,
+//! позиция ГЛАВНОГО курсора, число курсоров, язык (кликабельный —
+//! оверлей выбора языка 5.1); СПРАВА — транзиентное сообщение (пока
+//! висит — вместо «notepad+»). Сообщение НЕ подменяет левый блок
+//! (регрессия: «Syntax highlighting is off» вытеснял позицию/язык);
+//! блоки разделяются justify_between — не перекрываются. Обновление —
+//! на каждый cx.notify().
 
 use gpui::{div, prelude::*, px, rgb};
 
@@ -9,10 +12,9 @@ use crate::geometry::STATUS_H;
 use crate::workspace::Workspace;
 
 impl Workspace {
-    /// Левые части статус-бара БЕЗ транзиентного сообщения (единый
-    /// источник для текста и рендера): префикс «кодировка | переводы
-    /// | Ln/Col | …» + метка языка (кликабельная зона). `None` —
-    /// вкладок нет.
+    /// Левые части статус-бара (единый источник для текста и рендера):
+    /// префикс «кодировка | переводы | Ln/Col | …» + метка языка
+    /// (кликабельная зона). `None` — вкладок нет.
     fn status_parts(&self, cx: &gpui::App) -> Option<(String, &'static str)> {
         let tab = self.model().active()?;
         let (line, col) = (tab.cursor_line() + 1, tab.cursor_col() + 1);
@@ -37,11 +39,10 @@ impl Workspace {
         ))
     }
 
-    /// Текст левой половины статус-бара (для рендера и тестов).
+    /// Текст ЛЕВОГО блока — стабильный, от сообщений не зависит
+    /// (тестовая поверхность; рендер строит блоки сам).
+    #[cfg(test)]
     pub(crate) fn status_bar_text(&self, cx: &gpui::App) -> String {
-        if let Some(msg) = &self.status_message {
-            return msg.clone();
-        }
         match self.status_parts(cx) {
             Some((prefix, language)) => format!("{prefix}{language}"),
             None => "notepad+".to_string(),
@@ -49,17 +50,17 @@ impl Workspace {
     }
 
     pub(crate) fn render_status_bar(&self, cx: &gpui::Context<Self>) -> gpui::Div {
-        // Язык — кликабельная зона (5.1): открывает оверлей выбора.
-        // Пока висит транзиентное сообщение — язык недоступен (весь
-        // левый блок заменён сообщением, D8.5).
-        let (prefix, language) = match (self.status_message.is_none(), self.status_parts(cx)) {
-            (true, Some(parts)) => parts,
-            _ => (self.status_bar_text(cx), ""),
-        };
+        // Слева — всегда стандартный блок (язык кликабелен, 5.1);
+        // справа — транзиентное сообщение или «notepad+».
+        let (prefix, language) = self
+            .status_parts(cx)
+            .unwrap_or_else(|| ("notepad+".to_string(), ""));
+        let message = self.status_message.clone();
         div()
             .flex()
             .items_center()
             .justify_between()
+            .gap_4()
             .px_3()
             .h(px(STATUS_H))
             .flex_shrink_0()
@@ -87,6 +88,16 @@ impl Workspace {
                         )
                     }),
             )
-            .child(div().text_color(rgb(crate::theme::current().status_dim)).child("notepad+"))
+            .child(
+                div()
+                    .id("status-message")
+                    .debug_selector(|| "status-message".into())
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .max_w(gpui::relative(0.6))
+                    .overflow_hidden()
+                    .text_color(rgb(crate::theme::current().status_dim))
+                    .child(message.unwrap_or_else(|| "notepad+".to_string())),
+            )
     }
 }

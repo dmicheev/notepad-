@@ -562,6 +562,17 @@ fn push_column(spans: &mut Vec<Span>, start: usize, end: usize, col: usize) {
 
 /// Класс стиля по стеку скоупов: первый матч от ВНУТРЕННЕГО скоупа.
 fn class_for_scopes(stack: &ScopeStack) -> StyleClass {
+    // Имя поля JSON — проверка по ВСЕМУ стеку до классификации: ключ
+    // несёт внутри себя string.quoted.double, которая иначе затеняет
+    // meta.structure.dictionary.key на первом же внутреннем матче.
+    if stack
+        .scopes
+        .iter()
+        .rev()
+        .any(|s| s.build_string().starts_with("meta.structure.dictionary.key"))
+    {
+        return CLASS_TYPE;
+    }
     for scope in stack.scopes.iter().rev() {
         let s = scope.build_string();
         // Порядок mattered: частные случаи раньше общих.
@@ -648,6 +659,24 @@ mod tests {
         let kw = spans.iter().find(|(_, _, c)| *c == CLASS_KEYWORD).unwrap();
         assert_eq!(kw.0, 0);
         assert_eq!(kw.1, 2);
+    }
+
+    /// JSON: имена полей — CLASS_TYPE (отдельный цвет), значения-строки
+    /// — CLASS_STRING, числа — CLASS_NUMBER, литералы — CLASS_CONSTANT.
+    #[test]
+    fn json_keys_colored_as_type() {
+        let mut e = engine_for("json");
+        let d = doc("{\"name\": \"test\", \"n\": 42, \"ok\": true}\n");
+        e.ensure_window(&d, 0, 1);
+        let spans = classes(&e, &d, 0);
+        // Ключ «name» [1..7) — тип; значение «test» [9..15) — строка.
+        assert!(spans.contains(&(1, 7, CLASS_TYPE)), "{spans:?}");
+        assert!(spans.contains(&(9, 15, CLASS_STRING)), "{spans:?}");
+        // Вторая пара: ключ «n» и число, ключ «ok» и литерал.
+        assert!(spans.contains(&(17, 20, CLASS_TYPE)), "{spans:?}");
+        assert!(spans.contains(&(22, 24, CLASS_NUMBER)), "{spans:?}");
+        assert!(spans.contains(&(26, 30, CLASS_TYPE)), "{spans:?}");
+        assert!(spans.contains(&(32, 36, CLASS_CONSTANT)), "{spans:?}");
     }
 
     /// Комментарий красится комментарием (Python `# ...`).

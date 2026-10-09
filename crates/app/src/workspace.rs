@@ -104,6 +104,10 @@ pub struct Workspace {
     pub(crate) tree_focus: FocusHandle,
     /// Контекстное меню дерева (7.2): узел + позиция правого клика.
     pub(crate) context_menu: Option<crate::tree_panel::TreeContextMenu>,
+    /// Контекстное меню редактора (правый клик): панель, строка под
+    /// кликом, была ли закладка на строке в момент открытия, позиция.
+    pub(crate) editor_context_menu:
+        Option<crate::editor_mouse::EditorContextMenu>,
     /// Папка под курсором при drag-and-drop дерева (подсветка).
     pub(crate) drop_target: Option<std::path::PathBuf>,
     /// Наблюдатель FS воркспейса (7.3) + поколение (замена воркспейса
@@ -178,6 +182,7 @@ impl Workspace {
             tree_dialog: None,
             tree_focus: cx.focus_handle(),
             context_menu: None,
+            editor_context_menu: None,
             drop_target: None,
             fs_watch: None,
             watch_generation: 0,
@@ -201,6 +206,12 @@ impl Workspace {
     /// отложенно после первого кадра — холодный старт и открытие файлов
     /// syntect не платят. Прогревает ВСЕ панели (split view).
     pub fn refresh_all_languages(&mut self, cx: &mut Context<Self>) {
+        // Инициализация набора синтаксисов ДАЖЕ при нуле вкладок.
+        // Прогрев одноразовый (syntax_warmup_scheduled); без этого
+        // вызова холодный старт с пустым редактором оставляет
+        // try_syntax_set() == None НАВСЕГДА — все файлы, открытые
+        // позже, детектятся как Plain Text (не только JSON).
+        let _ = editor_core::syntax::syntax_set();
         for pane in &mut self.panes {
             for tab in pane.model.tabs_mut() {
                 tab.refresh_language();
@@ -962,6 +973,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_go_to_line))
             .on_action(cx.listener(Self::on_add_next_match))
             .on_action(cx.listener(Self::on_toggle_bookmark))
@@ -979,6 +991,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_lower_case))
             .on_action(cx.listener(Self::on_title_case))
             .on_action(cx.listener(Self::on_sentence_case))
+            .on_action(cx.listener(Self::on_format_json))
+            .on_action(cx.listener(Self::on_minify_json))
             .on_action(cx.listener(Self::on_find_in_file))
             .on_action(cx.listener(Self::on_find_in_tabs))
             .on_action(cx.listener(Self::on_find_in_folder))
@@ -1034,6 +1048,9 @@ impl Render for Workspace {
         // корня (паттерн goto/language overlay, D9.2).
         if self.context_menu.is_some() {
             root = root.child(self.render_context_menu(cx));
+        }
+        if self.editor_context_menu.is_some() {
+            root = root.child(self.render_editor_context_menu(cx));
         }
         if self.tree_dialog.is_some() {
             root = root.child(self.render_tree_dialog(cx));

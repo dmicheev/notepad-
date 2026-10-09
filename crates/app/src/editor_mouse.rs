@@ -33,6 +33,28 @@ impl DragState {
     }
 }
 
+/// Контекстное меню редактора (правый клик): строка под кликом
+/// (для пункта закладки), была ли закладка на строке в момент открытия
+/// (метка пункта Add/Remove), позиция меню (координаты окна).
+/// Панель не хранится: правый клик активирует панель, пункты меню
+/// работают с активной.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EditorContextMenu {
+    pub(crate) line: usize,
+    pub(crate) bookmarked: bool,
+    pub(crate) position: gpui::Point<gpui::Pixels>,
+}
+
+/// Пункт меню редактора (клик → существующий обработчик действия).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorMenuAction {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    ToggleBookmark,
+}
+
 impl Workspace {
     /// Диагностика мыши (NOTEPAD_DEBUG_MOUSE=1): каждое событие
     /// логируется в stderr с сырыми координатами и вычисленной
@@ -249,6 +271,143 @@ impl Workspace {
                 tab.select_to(drag.head.0, drag.head.1);
             }
             // Обычный клик: каретка уже стоит с mouse_down.
+        }
+        cx.notify();
+    }
+
+    // ---- Контекстное меню редактора (правый клик): copy/cut/paste +
+    // закладка на строке под кликом ----
+
+    /// Правый клик в редакторе панели `pi`: активировать панель, если
+    /// клик вне выделения — каретка в позицию клика; открыть меню.
+    pub(crate) fn on_editor_right_click_pane(
+        &mut self,
+        pi: usize,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_pane(pi, cx);
+        window.focus(&self.panes[pi].focus.clone());
+        let Some((line, col)) = self.pos_to_line_col(window, event.position) else {
+            return;
+        };
+        let anchor = self
+            .panes
+            .get_mut(pi)
+            .and_then(|p| p.model.active_mut())
+            .map(|tab| tab.right_click_anchor(line, col));
+        let Some(line) = anchor else { return };
+        let bookmarked = self.model().active().is_some_and(|tab| {
+            tab.bookmarked_lines().contains(&line)
+        });
+        // Меню дерева, если открыто, закрывается (один контекст-оверлей).
+        self.context_menu = None;
+        self.editor_context_menu = Some(EditorContextMenu {
+            line,
+            bookmarked,
+            position: event.position,
+        });
+        cx.notify();
+    }
+
+    /// Overlay меню (паттерн дерева): подложка закрывает кликами мимо,
+    /// пункты диспатчат те же обработчики, что меню/горячие клавиши.
+    pub(crate) fn render_editor_context_menu(&self, cx: &gpui::Context<Self>) -> gpui::Div {
+        use gpui::{MouseButton, div, prelude::*, px, rgb};
+        let Some(menu) = &self.editor_context_menu else {
+            return div();
+        };
+        let t = |k: &str| crate::i18n::t(cx, k);
+        let bookmark_label = if menu.bookmarked {
+            t("editor.ctx_bookmark_remove")
+        } else {
+            t("editor.ctx_bookmark_add")
+        };
+        // (метка, действие): пункты меню → существующие обработчики.
+        let items: Vec<(String, EditorMenuAction)> = vec![
+            (t("editor.ctx_copy"), EditorMenuAction::Copy),
+            (t("editor.ctx_cut"), EditorMenuAction::Cut),
+            (t("editor.ctx_paste"), EditorMenuAction::Paste),
+            (t("editor.ctx_select_all"), EditorMenuAction::SelectAll),
+            (bookmark_label, EditorMenuAction::ToggleBookmark),
+        ];
+        let mut menu_div = div()
+            .absolute()
+            .top(menu.position.y)
+            .left(menu.position.x)
+            .w(px(170.0))
+            .bg(rgb(crate::theme::current().tabbar))
+            .border_1()
+            .border_color(rgb(crate::theme::current().close_hover))
+            .rounded_md()
+            .text_size(px(11.0))
+            .shadow_md()
+            .py_1()
+            // Клик внутри меню не долетает до подложки (mouse_down
+            // раньше click — иначе закрытие съедает действие пункта).
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        for (ix, (label, action)) in items.iter().enumerate() {
+            let label_for_sel = label.clone();
+            let action = *action;
+            menu_div = menu_div.child(
+                div()
+                    .id(("editor-ctx-item", ix))
+                    .px_3()
+                    .py_1()
+                    .text_color(rgb(crate::theme::current().text))
+                    .hover(|d| d.bg(rgb(crate::theme::current().close_hover)))
+                    .debug_selector(move || format!("editor-ctx-menu:{label_for_sel}"))
+                    .on_click(cx.listener(move |this, _e, window, cx| {
+                        this.run_editor_menu_action(action, window, cx);
+                    }))
+                    .child(label.clone()),
+            );
+            // Разделитель между буфером обмена (с Select All) и закладкой.
+            if ix == 3 {
+                menu_div = menu_div.child(
+                    div().mx_2().my_1().h(px(1.0)).bg(rgb(crate::theme::current().close_hover)),
+                );
+            }
+        }
+        // Подложка: любой клик мимо пунктов закрывает меню.
+        div()
+            .absolute()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.editor_context_menu = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e, _w, cx| {
+                    this.editor_context_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(menu_div)
+    }
+
+    /// Пункт меню редактора → существующие обработчики действий
+    /// (никакой дублирующей логики; меню закрывается).
+    fn run_editor_menu_action(
+        &mut self,
+        action: EditorMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::actions::{CopyText, CutText, PasteText, SelectAll};
+        let Some(menu) = self.editor_context_menu.take() else { return };
+        match action {
+            EditorMenuAction::Copy => self.on_copy(&CopyText, window, cx),
+            EditorMenuAction::Cut => self.on_cut(&CutText, window, cx),
+            EditorMenuAction::Paste => self.on_paste(&PasteText, window, cx),
+            EditorMenuAction::SelectAll => self.on_select_all(&SelectAll, window, cx),
+            EditorMenuAction::ToggleBookmark => self.toggle_bookmark_at(menu.line, cx),
         }
         cx.notify();
     }

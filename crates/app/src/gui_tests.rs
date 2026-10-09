@@ -669,6 +669,57 @@ fn goto_hidden_line_jumps_to_fold_header(cx: &mut TestAppContext) {
     assert_eq!(line, 0, "caret lands on the fold header");
 }
 
+/// Поддержка JSON: FormatJson (pretty) через действие меню — одна
+/// транзакция (один undo), каретка в начало; MinifyJson возвращает
+/// компактный стиль; невалидный JSON — статус с позицией, текст не меняется.
+#[gpui::test]
+fn json_format_actions(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "json-fmt", "{\"a\":1,\"b\":[true,null]}");
+    cx.dispatch_action(FormatJson);
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
+    assert_eq!(text, "{\n  \"a\": 1,\n  \"b\": [\n    true,\n    null\n  ]\n}");
+    // Один шаг undo возвращает исходный минифицированный текст.
+    cx.dispatch_action(Undo);
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
+    assert_eq!(text, "{\"a\":1,\"b\":[true,null]}");
+
+    // Компактный стиль поверх pretty-вывода.
+    cx.dispatch_action(MinifyJson);
+    let text = cx.cx.update(|app| view.read(app).model().active().unwrap().doc.text());
+    assert_eq!(text, "{\"a\":1,\"b\":[true,null]}");
+
+    // Невалидный JSON: текст не меняется, сообщение в статус-баре.
+    cx.update_window_entity(&view, |ws, _w, _| {
+        ws.model_mut().active_mut().unwrap().replace_all_text("{\"a\": }");
+    });
+    cx.dispatch_action(FormatJson);
+    let (text, status) = cx.cx.update(|app| {
+        let ws = view.read(app);
+        (ws.model().active().unwrap().doc.text(), ws.status_message.clone())
+    });
+    assert_eq!(text, "{\"a\": }");
+    let status = status.expect("сообщение о невалидном JSON");
+    assert!(status.contains("line 1") && status.contains("column 7"), "{status}");
+}
+
+/// replace_all_text: одинаковый текст — no-op (dirty не ставится),
+/// после замены каретка в начале.
+#[gpui::test]
+fn replace_all_text_noop_and_caret(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "replace-all", "one\ntwo\n");
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model_mut().active_mut().unwrap();
+        tab.set_caret_at(1, 1);
+        let dirty = tab.dirty;
+        tab.replace_all_text("one\ntwo\n");
+        assert_eq!(tab.dirty, dirty, "no-op не делает вкладку dirty");
+        tab.replace_all_text("a\nb\n");
+        assert_eq!(tab.doc.text(), "a\nb\n");
+        assert!(tab.dirty);
+        assert_eq!(*tab.primary(), Selection::caret(0));
+    });
+}
+
 /// 4.6: операции строк через действия меню (SortAsc на выделении).
 #[gpui::test]
 fn sort_lines_action_on_selection(cx: &mut TestAppContext) {
@@ -995,7 +1046,9 @@ fn over_threshold_file_editable_declined(cx: &mut TestAppContext) {
     assert!(cx.has_pending_prompt(), "вопрос показан при открытии");
     cx.simulate_prompt_answer("Keep off");
     cx.run_until_parked();
-    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    let status = cx.cx.update(|app| {
+        view.read(app).status_message.clone().expect("сообщение о выключенной подсветке")
+    });
     assert!(
         status.contains("Syntax highlighting is off"),
         "got: {status}"
@@ -1042,7 +1095,9 @@ fn over_threshold_prompt_enable_highlights_any_size(cx: &mut TestAppContext) {
     assert_eq!(label, "Rust", "язык определился после согласия");
     assert_eq!(syntax.as_deref(), Some("Rust"), "движок активен для 20 МБ+");
     // Статус-бар сообщает о включении; редактирование работает.
-    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    let status = cx.cx.update(|app| {
+        view.read(app).status_message.clone().expect("сообщение о включении подсветки")
+    });
     assert!(status.contains("enabled for large"), "got: {status}");
     cx.simulate_keystrokes("z");
     let head = cx.cx.update(|app| {
@@ -1610,8 +1665,10 @@ fn folder_search_replace_keeps_disk_intact(cx: &mut TestAppContext) {
     assert_eq!(texts[0], "alpha PIN here\n");
     assert_eq!(texts[1], "beta PIN twice\nPIN again\n");
     assert_eq!(std::fs::read(&b).unwrap(), before_b, "диск НЕ тронут");
-    // Отчёт в статус-баре.
-    let status = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    // Отчёт в статус-баре (правая часть — транзиентное сообщение).
+    let status = cx.cx.update(|app| {
+        view.read(app).status_message.clone().expect("отчёт о заменах")
+    });
     assert!(
         status.contains("Replaced 3 occurrence(s) in 2 file(s)"),
         "got: {status}"
@@ -3118,25 +3175,30 @@ fn shortcuts_window_button_and_search(cx: &mut TestAppContext) {
 // ---- Транзиентные сообщения статус-бара (починка: позиция/кодировка
 // пропадали навсегда после тумблеров) ----
 
-/// Сообщение подменяет левый блок на TTL секунд, затем позиция/
-/// кодировка/язык возвращаются; новое сообщение перезапускает таймер.
+/// Сообщение живёт справа на TTL секунд, НЕ подменяя левый блок
+/// (кодировка/позиция/язык стабильны); затем очищается, новое
+/// сообщение перезапускает таймер (поколение).
 #[gpui::test]
 fn status_message_auto_expires(cx: &mut TestAppContext) {
     let (view, cx) = markdown_window(cx, "status-ttl", &[("a.txt", "x\n")]);
     cx.run_until_parked();
-    // Базовый текст: кодировка | переводы | позиция | язык.
+    // Базовый текст левого блока: кодировка | переводы | позиция | язык.
     let base = cx.cx.update(|app| view.read(app).status_bar_text(app));
     assert!(base.starts_with("UTF-8"), "база: {base}");
     assert!(base.contains("Ln 1, Col 1"), "база: {base}");
+    let no_message = cx.cx.update(|app| view.read(app).status_message.clone());
+    assert_eq!(no_message, None, "без сообщений справа «notepad+»");
 
-    // Тумблер превью → сообщение; TTL не прошло — держится.
+    // Тумблер превью → сообщение справа; левый блок НЕ тронут.
     cx.dispatch_action(crate::actions::ToggleMarkdownPreview);
     cx.run_until_parked();
-    let shown = cx.cx.update(|app| view.read(app).status_bar_text(app));
-    assert!(!shown.contains("Ln 1"), "сообщение подменило блок: {shown}");
+    let shown = cx.cx.update(|app| view.read(app).status_message.clone());
+    assert!(shown.is_some(), "сообщение показано");
+    let left = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    assert!(left.contains("Ln 1, Col 1"), "левый блок стабилен: {left}");
 
-    // Новое сообщение за секунду до истечения перезапускает таймер
-    // (поколение): sync-scroll через 3 с после превью.
+    // Новое сообщение перезапускает таймер (поколение): sync-scroll
+    // через 3 с после превью.
     cx.cx
         .executor()
         .advance_clock(std::time::Duration::from_secs(3));
@@ -3148,19 +3210,182 @@ fn status_message_auto_expires(cx: &mut TestAppContext) {
         .executor()
         .advance_clock(std::time::Duration::from_secs(3));
     cx.run_until_parked();
-    let held = cx.cx.update(|app| view.read(app).status_bar_text(app));
+    let held = cx.cx.update(|app| view.read(app).status_message.clone()).expect("новое сообщение живо");
     assert!(held.contains("scrolling"), "новое сообщение живо: {held}");
 
-    // До конца TTL sync-сообщения — блок всё ещё подменён…
+    // +0.5 с от sync-сообщения (TTL 4 с) — живо; ещё +1 с (4.5 > TTL) —
+    // очистилось, левый блок при этом не менялся ни разу.
+    cx.cx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    let held2 = cx.cx.update(|app| view.read(app).status_message.clone());
+    assert!(held2.is_some(), "sync-сообщение ещё в TTL");
     cx.cx
         .executor()
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
-    // …и ещё секунда — очистилось, база вернулась.
-    cx.cx
-        .executor()
-        .advance_clock(std::time::Duration::from_secs(1));
-    cx.run_until_parked();
+    let expired = cx.cx.update(|app| view.read(app).status_message.clone());
+    assert_eq!(expired, None, "сообщение истекло");
     let restored = cx.cx.update(|app| view.read(app).status_bar_text(app));
-    assert!(restored.contains("Ln 1, Col 1"), "база вернулась: {restored}");
+    assert!(restored.contains("Ln 1, Col 1"), "левый блок на месте: {restored}");
+}
+
+/// Регрессия подсветки JSON: холодный старт с ПУСТЫМ редактором —/// прогрев (одноразовый) не должен оставлять набор синтаксисов
+/// неинициализированным, иначе файлы, открытые позже (например
+/// .json), детектируются как Plain Text навсегда.
+#[gpui::test]
+fn warmup_without_tabs_enables_later_language_detection(cx: &mut TestAppContext) {
+    let dir = TempDir::new("json-cold-start");
+    let path = dir.write("data.json", "{\n  \"name\": \"test\",\n  \"n\": 42\n}\n");
+    std::mem::forget(dir);
+    let (view, cx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+    cx.run_until_parked();
+    // Прогрев при нуле вкладок (путь таймера 50 мс из render).
+    cx.update_window_entity(&view, |ws, _w, cx| ws.refresh_all_languages(cx));
+    cx.update_window_entity(&view, |ws, _w, _cx| {
+        assert!(
+            editor_core::syntax::try_syntax_set().is_some(),
+            "прогрев инициализирует набор даже без вкладок"
+        );
+        // Файл, открытый ПОСЛЕ прогрева, получает язык и грамматику.
+        ws.model_mut().open_path(&path).unwrap();
+        let tab = ws.model().active().unwrap();
+        assert_eq!(tab.language.label(), "JSON");
+        assert_eq!(tab.highlight.syntax_name(), Some("JSON"));
+    });
+}
+
+/// Контекстное меню редактора (правый клик): Copy копирует выделение
+/// (клик внутри выделения его сохраняет), Paste вставляет из клипборда,
+/// Add Bookmark ставит закладку на строку под кликом; пункты те же
+/// обработчики, что меню/хоткеи (дублирующей логики нет).
+#[gpui::test]
+fn editor_context_menu_copy_paste_bookmark(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "editor-ctx", "alpha\nbeta\n");
+    let grid = MouseGrid::of(cx, &view);
+
+    // Выделение "beta" [5..9), правый клик ВНУТРИ выделения —
+    // выделение сохраняется (иначе Copy скопировал бы пустоту).
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model_mut().active_mut().unwrap();
+        tab.set_caret_at(1, 0);
+        tab.select_to(1, 4);
+    });
+    cx.simulate_mouse_down(grid.at(1.0, 2.0), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let copy = cx
+        .debug_bounds("editor-ctx-menu:Copy")
+        .expect("пункт Copy в контекстном меню");
+    cx.simulate_click(center_of(copy), Modifiers::default());
+    cx.run_until_parked();
+    let clip = cx.cx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(clip.as_deref(), Some("beta"), "выделение пережило правый клик");
+    // Меню закрылось после пункта (bounds последнего кадра могут
+    // отставать — инвариант состояния, не отрисовки).
+    cx.update_window_entity(&view, |ws, _w, _cx| {
+        assert!(ws.editor_context_menu.is_none(), "меню закрыто");
+    });
+
+    // Правый клик вне выделения (строка 0) — каретка переезжает,
+    // Add Bookmark ставит закладку на строку 0.
+    cx.simulate_mouse_down(grid.at(0.0, 1.0), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let bookmark = cx
+        .debug_bounds("editor-ctx-menu:Add Bookmark")
+        .expect("пункт Add Bookmark");
+    cx.simulate_click(center_of(bookmark), Modifiers::default());
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model().active().unwrap();
+        assert_eq!(tab.bookmarked_lines(), vec![0], "закладка на строке клика");
+        assert_eq!(tab.cursor_line(), 0, "каретка переехала под клик");
+    });
+
+    // Повторный правый клик на той же строке: метка пункта сменилась
+    // (закладка есть) → Remove Bookmark снимает её.
+    cx.simulate_mouse_down(grid.at(0.0, 1.0), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let remove = cx
+        .debug_bounds("editor-ctx-menu:Remove Bookmark")
+        .expect("метка пункта сменилась на Remove");
+    cx.simulate_click(center_of(remove), Modifiers::default());
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |ws, _w, _| {
+        assert!(
+            ws.model().active().unwrap().bookmarked_lines().is_empty(),
+            "закладка снята"
+        );
+    });
+
+    // Paste из клипборда ("beta") в каретку строки 0 (вне выделения —
+    // каретка переехала под правый клик).
+    cx.simulate_mouse_down(grid.at(0.0, 1.0), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let paste = cx
+        .debug_bounds("editor-ctx-menu:Paste")
+        .expect("пункт Paste");
+    cx.simulate_click(center_of(paste), Modifiers::default());
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model().active().unwrap();
+        assert!(
+            tab.doc.line_content(0).contains("beta"),
+            "paste вставил текст: {:?}",
+            tab.doc.text()
+        );
+    });
+}
+
+/// Клик мимо goto-диалога закрывает его (подложка; регрессия бага
+/// «диалог висит на экране, пока не нажат Esc»).
+#[gpui::test]
+fn goto_dialog_closes_on_outside_click(cx: &mut TestAppContext) {
+    let (view, cx, _path) = editor_with_file(cx, "goto-underlay", "one\ntwo\n");
+    cx.dispatch_action(GoToLine);
+    let open = cx.cx.update(|app| view.read(app).goto_input.clone());
+    assert_eq!(open, Some(String::new()));
+    // Клик вне диалога (диалог ~ y 44..76, x 340..620).
+    cx.simulate_click(point(px(500.0), px(300.0)), Modifiers::default());
+    cx.run_until_parked();
+    let open = cx.cx.update(|app| view.read(app).goto_input.clone());
+    assert_eq!(open, None, "клик мимо закрыл диалог");
+    // Фокус вернулся в редактор: ввод идёт в текст.
+    cx.simulate_keystrokes("x");
+    cx.update_window_entity(&view, |ws, _w, _cx| {
+        let tab = ws.model().active().unwrap();
+        assert!(tab.doc.text().contains("x"), "фокус в редакторе после закрытия");
+    });
+}
+
+/// Select All: хоткей Cmd+A и пункт контекстного меню — выделение
+/// всего документа; Copy после него кладёт весь текст в клипборд.
+#[gpui::test]
+fn select_all_via_hotkey_and_context_menu(cx: &mut TestAppContext) {
+    cx.update(bind_app_keys);
+    let (view, cx, _path) = editor_with_file(cx, "select-all", "alpha\nbeta\n");
+    let grid = MouseGrid::of(cx, &view);
+
+    // Хоткей: Cmd+A → выделено всё, Copy — весь текст в клипборде.
+    cx.simulate_keystrokes("cmd-a");
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model().active().unwrap();
+        assert_eq!(tab.primary(), &Selection::range(0, 11), "cmd-a выделил всё");
+    });
+    cx.simulate_keystrokes("cmd-c");
+    let clip = cx.cx.read_from_clipboard().and_then(|i| i.text());
+    assert_eq!(clip.as_deref(), Some("alpha\nbeta\n"), "copy после select all");
+
+    // Правый клик (вне выделения — каретка) → пункт Select All.
+    cx.simulate_mouse_down(grid.at(0.0, 1.0), MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let select_all = cx
+        .debug_bounds("editor-ctx-menu:Select All")
+        .expect("пункт Select All в контекстном меню");
+    cx.simulate_click(center_of(select_all), Modifiers::default());
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |ws, _w, _| {
+        let tab = ws.model().active().unwrap();
+        assert_eq!(tab.primary(), &Selection::range(0, 11), "пункт меню выделил всё");
+    });
 }

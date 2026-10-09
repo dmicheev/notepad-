@@ -441,6 +441,11 @@ impl Workspace {
         }
     }
 
+    /// Cmd+A: выделить весь документ активной вкладки.
+    pub(crate) fn on_select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.with_active_tab(|tab| tab.select_all(), cx);
+    }
+
     // ---- Клавиатурный ввод редактора (plain-клавиши; Cmd/Ctrl —
     // действия выше; список клавиш — D9.2/D9.3) ----
 
@@ -619,6 +624,39 @@ impl Workspace {
 
     pub(crate) fn on_sentence_case(&mut self, _: &SentenceCase, _w: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(|tab| tab.change_case(editor_core::CaseMode::Sentence), cx);
+    }
+
+    // ---- JSON-форматтеры (поддержка JSON): ошибки разбора — в
+    // статус-бар с позицией; точки запуска — меню/тулбар Text (без
+    // горячих клавиш, как операции строк — 8.5) ----
+
+    /// Формат JSON: читаемый вид (pretty, 2 пробела).
+    pub(crate) fn on_format_json(&mut self, _: &FormatJson, _w: &mut Window, cx: &mut Context<Self>) {
+        self.format_active_json(editor_core::JsonStyle::Pretty, cx);
+    }
+
+    /// Формат JSON: компактный стиль (minify).
+    pub(crate) fn on_minify_json(&mut self, _: &MinifyJson, _w: &mut Window, cx: &mut Context<Self>) {
+        self.format_active_json(editor_core::JsonStyle::Compact, cx);
+    }
+
+    fn format_active_json(&mut self, style: editor_core::JsonStyle, cx: &mut Context<Self>) {
+        let Some(tab) = self.model_mut().active_mut() else { return };
+        let src = tab.doc.text();
+        match editor_core::format_json(&src, style) {
+            Ok(formatted) => tab.replace_all_text(&formatted),
+            Err(e) => {
+                self.set_status_message(
+                    crate::i18n::tf(
+                        cx,
+                        "status.json_invalid",
+                        &[("line", &e.line.to_string()), ("col", &e.col.to_string()), ("msg", &e.message)],
+                    ),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
     }
 
     // ---- Мульти-курсор (4.3): Cmd+D ----

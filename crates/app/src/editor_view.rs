@@ -305,6 +305,12 @@ impl Workspace {
                     this.on_editor_mouse_down_pane(pi, e, window, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e, window, cx| {
+                    this.on_editor_right_click_pane(pi, e, window, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(move |this, e, window, cx| {
                 this.on_editor_mouse_move_pane(pi, e, window, cx);
             }))

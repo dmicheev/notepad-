@@ -25,6 +25,7 @@ pub(crate) enum KeyAction {
     CopyText,
     CutText,
     PasteText,
+    SelectAll,
     GoToLine,
     AddCursor,
     ToggleBookmark,
@@ -79,6 +80,7 @@ pub(crate) const KEYMAP: &[KeyDef] = &[
     KeyDef { key: "cmd-c", action: KeyAction::CopyText, section: "edit", label: "shortcuts.action.copy" },
     KeyDef { key: "cmd-x", action: KeyAction::CutText, section: "edit", label: "shortcuts.action.cut" },
     KeyDef { key: "cmd-v", action: KeyAction::PasteText, section: "edit", label: "shortcuts.action.paste" },
+    KeyDef { key: "cmd-a", action: KeyAction::SelectAll, section: "edit", label: "shortcuts.action.select_all" },
     // Навигация
     KeyDef { key: "cmd-g", action: KeyAction::GoToLine, section: "navigation", label: "shortcuts.action.go_to_line" },
     KeyDef { key: "cmd-d", action: KeyAction::AddCursor, section: "navigation", label: "shortcuts.action.add_cursor" },
@@ -128,6 +130,7 @@ pub(crate) fn bind_all(cx: &mut App) {
             KeyAction::CopyText => KeyBinding::new(def.key, CopyText, None),
             KeyAction::CutText => KeyBinding::new(def.key, CutText, None),
             KeyAction::PasteText => KeyBinding::new(def.key, PasteText, None),
+            KeyAction::SelectAll => KeyBinding::new(def.key, SelectAll, None),
             KeyAction::GoToLine => KeyBinding::new(def.key, GoToLine, None),
             KeyAction::AddCursor => KeyBinding::new(def.key, AddNextMatch, None),
             KeyAction::ToggleBookmark => KeyBinding::new(def.key, ToggleBookmark, None),

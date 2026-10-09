@@ -62,9 +62,12 @@ impl Workspace {
     /// поддерева редактора) — фокус в диалоге, клавиши не попадают в
     /// `handle_key` (D9.2). Позиция/размер (top 44, left 340, ширина
     /// 280) подобраны вручную: над редактором, правее панели.
+    /// Подложка на всё окно: клик мимо диалога закрывает (Esc-синоним);
+    /// клик внутри гасится (stop_propagation) — подложка не съедает.
     pub(crate) fn render_goto_overlay(&self, cx: &Context<Self>) -> gpui::Div {
+        use gpui::MouseButton;
         let input = self.goto_input.clone().unwrap_or_default();
-        div()
+        let dialog = div()
             .absolute()
             // Позиция поверх области редактора (подобрана вручную).
             .top(px(44.0))
@@ -83,6 +86,8 @@ impl Workspace {
             .shadow_md()
             .track_focus(&self.goto_focus)
             .on_key_down(cx.listener(Self::handle_goto_key))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(div().text_color(rgb(crate::theme::current().dim)).child(crate::i18n::t(cx, "goto.label")))
             .child(
                 div()
@@ -93,6 +98,28 @@ impl Workspace {
                     } else {
                         input
                     }),
+            );
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.goto_input = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e, window, cx| {
+                    this.goto_input = None;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .child(dialog)
     }
 }

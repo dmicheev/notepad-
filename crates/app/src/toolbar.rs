@@ -96,6 +96,8 @@ fire!(fire_upper, UpperCase);
 fire!(fire_lower, LowerCase);
 fire!(fire_title, TitleCase);
 fire!(fire_sentence, SentenceCase);
+fire!(fire_json_pretty, FormatJson);
+fire!(fire_json_minify, MinifyJson);
 fire!(fire_theme_system, ThemeSystem);
 fire!(fire_theme_dark, ThemeDark);
 fire!(fire_theme_light, ThemeLight);
@@ -464,6 +466,8 @@ impl Workspace {
                 ("menu.text.lower", fire_lower),
                 ("menu.text.title", fire_title),
                 ("menu.text.sentence", fire_sentence),
+                ("menu.text.json_pretty", fire_json_pretty),
+                ("menu.text.json_minify", fire_json_minify),
             ]
             .into_iter()
             .map(|(label_key, fire)| Item { label_key, fire: Some(fire), checked: false })

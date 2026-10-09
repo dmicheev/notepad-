@@ -147,7 +147,7 @@ impl crate::workspace::Workspace {
                     .child(lang.clone()),
             );
         }
-        gpui::div()
+        let overlay = gpui::div()
             .id("ui-lang-overlay")
             .debug_selector(|| "ui-lang-overlay".to_string())
             .absolute()
@@ -165,6 +165,9 @@ impl crate::workspace::Workspace {
             .shadow_md()
             .track_focus(&self.ui_lang_focus)
             .on_key_down(cx.listener(Self::handle_ui_language_key))
+            // Клик внутри не доходит до подложки.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(
                 gpui::div()
                     .px_3()
@@ -179,7 +182,30 @@ impl crate::workspace::Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll(),
+            );
+        // Подложка: клик мимо диалога закрывает (Esc-синоним).
+        gpui::div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _e, window, cx| {
+                    this.ui_lang_dialog = false;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
             )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _e, window, cx| {
+                    this.ui_lang_dialog = false;
+                    window.focus(&this.active_focus());
+                    cx.notify();
+                }),
+            )
+            .child(overlay)
             .into_any_element()
     }
 }
